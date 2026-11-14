@@ -143,7 +143,7 @@ class App:
 
         # 底部操作：隐藏窗口 / 退出程序
         bottom = tk.Frame(root, bg=BG)
-        bottom.pack(pady=(8, 16))
+        bottom.pack(side="bottom", before=root.winfo_children()[0], pady=6)
         tk.Button(bottom, text="隐藏窗口", font=f_normal, bg="#E2E8F0",
                   fg=TEXT, activebackground="#CBD5E1", relief="flat",
                   borderwidth=0, cursor="hand2", width=10, pady=8,
@@ -182,7 +182,7 @@ class App:
         self.tray = TrayIcon(top_hwnd,
                              self._tray_toggle,
                              self._tray_open,
-                             self.quit_app)
+                             lambda: root.after_idle(self.quit_app))
         self.tray.on_resume=lambda:self.root.after_idle(self.resume_desktop)
         self.tray.install()
         ctypes.windll.wtsapi32.WTSRegisterSessionNotification(wintypes.HWND(top_hwnd),0)
@@ -296,6 +296,9 @@ class App:
         self.refresh_ui()
 
     def quit_app(self):
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
         state=icons_visible()
         if state is not None:
             self.cfg['last_visible']=state

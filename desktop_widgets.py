@@ -4,7 +4,8 @@ from ctypes import wintypes
 import json
 import os
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
+from concurrent.futures import Future, ThreadPoolExecutor
 from local_weather import refresh as refresh_weather
 from wallpaper_clock import sample
 import time
@@ -223,7 +224,15 @@ class Widgets:
             self.last_clock=''
         if self.weather_on.get() and self.weather_job is None and now>=self.weather_due:
             self.weather_status='正在更新'
-            self.weather_job=self.worker.submit(refresh_weather,self.weather.copy())
+            future = Future()
+            self.weather_job = future
+            previous = self.weather.copy()
+            def fetch():
+                try:
+                    future.set_result(refresh_weather(previous))
+                except Exception as error:
+                    future.set_exception(error)
+            Thread(target=fetch, name='weather', daemon=True).start()
 
     def toggle_weather(self):
         self.weather_due=0
@@ -283,6 +292,9 @@ class Widgets:
             self.settings_window.lift();return
         w=tk.Toplevel(self.root);self.settings_window=w;w.title('时钟与桌面外观');w.geometry('610x700')
         w.minsize(520,550)
+        toolbar = ttk.Frame(w)
+        toolbar.pack(fill='x', padx=16, pady=(8,0))
+        ttk.Button(toolbar,text='退出时隙',command=self.app.quit_app).pack(side='right')
         pane=ttk.Frame(w,padding=16);pane.pack(fill='both',expand=True)
         ttk.Label(pane,text='时钟外观 · 修改立即生效',font=('Microsoft YaHei UI',14)).pack(anchor='w')
         box=ttk.Frame(pane);box.pack(fill='x',pady=12)
