@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.log*
+*.lnk
+.venv/
+config.json
+desktop_widgets.json
+*.tmp
