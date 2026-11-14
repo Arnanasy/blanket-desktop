@@ -132,7 +132,7 @@ class Widgets:
     def save(self):
         self.cfg['weather_enabled']=self.weather_on.get()
         if self.weather:
-            self.cfg['weather_cache']={k:self.weather[k] for k in ('line','updated','place') if k in self.weather}
+            self.cfg['weather_cache']={k:self.weather[k] for k in ('line','updated','place','source','station') if k in self.weather}
         self.cfg.update(groups=self.groups,clock=self.clock_on.get(),bar=self.bar_on.get(),appearance=self.style,adaptive=self.adaptive.get(),recent=self.recent,wallpaper_palettes=self.palettes)
         try:
             tmp=self.path.with_suffix('.tmp'); tmp.write_text(json.dumps(self.cfg,ensure_ascii=False,indent=2),encoding='utf-8'); tmp.replace(self.path)
@@ -204,7 +204,7 @@ class Widgets:
         self.weather_tip=tk.Toplevel(self.clock)
         self.weather_tip.overrideredirect(True)
         self.weather_tip.geometry(f'+{event.x_root+15}+{event.y_root+20}')
-        tk.Label(self.weather_tip,text=details+' · Open-Meteo',padx=5,pady=2).pack()
+        tk.Label(self.weather_tip,text=details+' · '+self.weather.get('source','Open-Meteo'),padx=5,pady=2).pack()
         self.weather_tip.after(2200,self.hide_weather_tip)
 
     def update_weather(self,now):
@@ -255,6 +255,9 @@ class Widgets:
         weather=''
         if self.weather_on.get():
             weather=self.weather.get('line') or ('天气暂不可用' if self.weather_status=='更新失败' else '正在获取当地天气…')
+            city=self.weather.get('place')
+            if city and city not in ('系统定位','网络定位'):
+                weather=f'{city} · {weather}'
             if self.weather and (self.weather_status=='更新失败' or time.time()-self.weather['updated']>1800):
                 weather+='（上次）'
         extra=df.metrics('linespace') if weather else 0
