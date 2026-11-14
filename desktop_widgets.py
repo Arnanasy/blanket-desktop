@@ -384,7 +384,9 @@ class Widgets:
     def drag(self,e):
         self.place_clock(e.x_root-self.offset[0],e.y_root-self.offset[1])
     def finish_drag(self):
-        self.place_clock(self.clock.winfo_x(),self.clock.winfo_y(),True);self.save();self.sample_wallpaper()
+        self.place_clock(self.clock.winfo_x(),self.clock.winfo_y(),True)
+        u.SetWindowPos(self.clock_hwnd,1,0,0,0,0,0x0013)
+        self.save();self.sample_wallpaper()
 
     def fullscreen_active(self):
         hwnd=u.GetForegroundWindow();name=ctypes.create_unicode_buffer(128)
@@ -471,8 +473,9 @@ class Widgets:
                 self.clock.geometry(f'{x:+d}{y:+d}')
                 # SW_SHOWNOACTIVATE plus SWP_NOACTIVATE restores above the wallpaper
                 # without making this widget the foreground application.
+                # Use HWND_BOTTOM (1) so the desktop clock stays below all application windows.
                 u.ShowWindow(self.clock_hwnd,4)
-                u.SetWindowPos(self.clock_hwnd,0,x,y,0,0,0x0011)
+                u.SetWindowPos(self.clock_hwnd,1,x,y,0,0,0x0011)
         elif visible:self.clock.withdraw()
         if visible and now-self.last_position_check>1:
             self.place_clock(self.clock.winfo_x(),self.clock.winfo_y())
