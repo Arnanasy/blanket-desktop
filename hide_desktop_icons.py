@@ -25,6 +25,7 @@ from desktop_widgets import Widgets
 from tray_icon import TrayIcon
 from preferences import load_config, save_config, autostart_enabled, set_autostart
 from desktop_windows import DesktopClick, user32, get_cursor, icons_visible, set_icons_visible, in_hotzone, input_idle_seconds, invalidate_cache
+import desktop_recovery
 from mouse_events import MouseEvents
 import queue
 
@@ -311,6 +312,12 @@ class App:
         # 退出前确保桌面图标恢复显示，避免用户找不到图标
         if icons_visible() is False:
             set_icons_visible(True)
+        if icons_visible() is True and getattr(self, 'recovery_guard', None):
+            try:
+                self.recovery_guard.stdin.write(b'restored\n')
+                self.recovery_guard.stdin.close()
+            except OSError:
+                pass
         if getattr(self, "tray", None):
             self.tray.destroy()
         self.root.destroy()
@@ -436,7 +443,9 @@ def main():
         raise ctypes.WinError(ctypes.get_last_error())
 
     root = tk.Tk()
-    App(root, show_event)
+    guard = desktop_recovery.start()
+    app = App(root, show_event)
+    app.recovery_guard = guard
 
     root.update_idletasks()
     w = 340
