@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from local_weather import refresh as refresh_weather
 from wallpaper_clock import sample
 import time
 import tkinter as tk
@@ -91,8 +92,17 @@ class Widgets:
             pair = supplied.get(mode) if isinstance(supplied,dict) else None
             if isinstance(pair,list) and len(pair)==2 and all(isinstance(c,str) and re.fullmatch(r'#[0-9a-fA-F]{6}',c) for c in pair):
                 self.palettes[mode]=pair
+        self.weather_on=tk.BooleanVar(value=self.cfg.get('weather_enabled',True))
+        cached=self.cfg.get('weather_cache')
+        self.weather=cached if isinstance(cached,dict) and isinstance(cached.get('line'),str) and isinstance(cached.get('updated'),(int,float)) else {}
+        self.weather_status='等待更新'
+        self.weather_job=None
+        self.weather_due=0
+        self.weather_tip=None
         self.clock_label = tk.Canvas(self.clock,bg='#010203',highlightthickness=0)
         self.clock_label.pack()
+        self.clock_label.bind('<Enter>',self.show_weather_tip)
+        self.clock_label.bind('<Leave>',self.hide_weather_tip)
         self.clock_label.bind('<ButtonPress-1>',self.drag_start)
         self.clock_label.bind('<B1-Motion>',self.drag)
         self.clock_label.bind('<ButtonRelease-1>',lambda e:self.finish_drag())
@@ -119,6 +129,9 @@ class Widgets:
         self.root.after(50,self.tick)
 
     def save(self):
+        self.cfg['weather_enabled']=self.weather_on.get()
+        if self.weather:
+            self.cfg['weather_cache']={k:self.weather[k] for k in ('line','updated','place') if k in self.weather}
         self.cfg.update(groups=self.groups,clock=self.clock_on.get(),bar=self.bar_on.get(),appearance=self.style,adaptive=self.adaptive.get(),recent=self.recent,wallpaper_palettes=self.palettes)
         try:
             tmp=self.path.with_suffix('.tmp'); tmp.write_text(json.dumps(self.cfg,ensure_ascii=False,indent=2),encoding='utf-8'); tmp.replace(self.path)
@@ -175,6 +188,49 @@ class Widgets:
             self.sample_again=False
             self.sample_wallpaper()
 
+    def hide_weather_tip(self,event=None):
+        if self.weather_tip:
+            self.weather_tip.destroy()
+            self.weather_tip=None
+
+    def show_weather_tip(self,event):
+        self.hide_weather_tip()
+        if not self.weather_on.get():return
+        details=self.weather_status
+        if self.weather:
+            stamp=time.strftime('%m-%d %H:%M',time.localtime(self.weather['updated']))
+            details=f"{self.weather.get('place','')} · {stamp} 更新 · {details}"
+        self.weather_tip=tk.Toplevel(self.clock)
+        self.weather_tip.overrideredirect(True)
+        self.weather_tip.geometry(f'+{event.x_root+15}+{event.y_root+20}')
+        tk.Label(self.weather_tip,text=details+' · Open-Meteo',padx=5,pady=2).pack()
+        self.weather_tip.after(2200,self.hide_weather_tip)
+
+    def update_weather(self,now):
+        if self.weather_job and self.weather_job.done():
+            try:
+                result=self.weather_job.result()
+                if self.weather_on.get():
+                    self.weather=result
+                    self.weather_status='当地天气'
+                    self.save()
+                delay=300
+            except Exception:
+                self.weather_status='更新失败'
+                delay=120
+            self.weather_job=None
+            self.weather_due=now+delay
+            self.last_clock=''
+        if self.weather_on.get() and self.weather_job is None and now>=self.weather_due:
+            self.weather_status='正在更新'
+            self.weather_job=self.worker.submit(refresh_weather,self.weather.copy())
+
+    def toggle_weather(self):
+        self.weather_due=0
+        self.last_clock=''
+        self.hide_weather_tip()
+        self.save()
+
     def draw_clock(self, canvas=None):
         c=canvas or self.clock_label; st=self.style
         c.delete('all')
@@ -187,6 +243,14 @@ class Widgets:
         pad=st['padding']; horizontal=st['layout']=='左右排列'
         width=(tw+dw+pad if horizontal and dw else max(tw,dw))+pad*2
         height=(max(th,dh) if horizontal else th+dh)+pad*2
+        weather=''
+        if self.weather_on.get():
+            weather=self.weather.get('line') or ('天气暂不可用' if self.weather_status=='更新失败' else '正在获取当地天气…')
+            if self.weather and (self.weather_status=='更新失败' or time.time()-self.weather['updated']>1800):
+                weather+='（上次）'
+        extra=df.metrics('linespace') if weather else 0
+        width=max(width,df.measure(weather)+pad*2)
+        height+=extra
         if st['shape']=='圆形':width=height=max(width,height)
         c.configure(width=width,height=height)
         if st['shape']!='透明':
@@ -205,12 +269,13 @@ class Widgets:
             c.create_text(x,y,**options)
         if horizontal and dw:
             total=tw+dw+pad;x=(width-total)/2
-            lettering(x,height/2,text=clock,font=f,fill=fg,anchor='w')
-            lettering(x+tw+pad,height/2,text=date,font=df,fill=fg,anchor='w')
+            lettering(x,(height-extra)/2,text=clock,font=f,fill=fg,anchor='w')
+            lettering(x+tw+pad,(height-extra)/2,text=date,font=df,fill=fg,anchor='w')
         else:
-            y=(height-th-dh)/2
+            y=(height-extra-th-dh)/2
             lettering(width/2,y,text=clock,font=f,fill=fg,anchor='n')
             if dh:lettering(width/2,y+th,text=date,font=df,fill=fg,anchor='n')
+        if weather:lettering(width/2,height-pad,text=weather,font=df,fill=fg,anchor='s')
         if canvas is None:self.clock.attributes('-alpha',st['opacity']/100)
 
     def settings(self):
@@ -254,6 +319,7 @@ class Widgets:
             self.save()
         ttk.Checkbutton(box,text='透明时钟按壁纸亮度配色',variable=self.adaptive,command=toggle_adaptive).pack(anchor='w')
         switches=ttk.Frame(pane);switches.pack(fill='x')
+        ttk.Checkbutton(switches,text='当地天气',variable=self.weather_on,command=self.toggle_weather).pack(side='left')
         ttk.Checkbutton(switches,text='图标隐藏时显示时钟',variable=self.clock_on,command=self.save).pack(side='left')
         ttk.Checkbutton(switches,text='启用右侧启动栏',variable=self.bar_on,command=self.save).pack(side='left')
         ttk.Label(pane,text='图标隐藏时才显示时钟 · 可直接拖动，右键设置（预览可滚动）').pack(anchor='w',pady=(10,4))
@@ -348,6 +414,7 @@ class Widgets:
         except OSError:pass
     def tick(self):
         now=time.monotonic(); p=wintypes.POINT(); u.GetCursorPos(ctypes.byref(p))
+        self.update_weather(now)
         if now-self.last_theme>30:self.theme();self.last_theme=now
         text=time.strftime('%H:%M:%S' if self.style['seconds'] else '%H:%M')
         if text!=self.last_clock:
