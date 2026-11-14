@@ -120,8 +120,7 @@ class Widgets:
         self.preview=None
         self.draw_clock()
         self.bar = tk.Toplevel(self.root); self.bar.withdraw(); self.bar.overrideredirect(True)
-        self.bar.configure(bg='#151B26'); self.bar.attributes('-topmost',True)
-        self.bar.attributes('-alpha', 0.88)
+        self.bar.configure(bg='#18202D'); self.bar.attributes('-topmost',True)
         self.expanded = set(); self.busy=False; self.last_inside=time.monotonic(); self.last_theme=0; self.last_clock=''
         self.edge_since = None
         self.edge_monitor = None
@@ -461,9 +460,6 @@ class Widgets:
         desktop_foreground=foreground if buf.value in ('WorkerW','Progman') else None
         if desktop_foreground and desktop_foreground!=self.last_desktop_foreground:
             self.app.invalidate_desktop()
-            # 用户按 Win+D 或切回桌面时，强制纠正 Z 序确保紧贴在桌面壁纸最上层
-            if visible:
-                u.SetWindowPos(self.clock_hwnd, 0, 0, 0, 0, 0, 0x0013)
         self.last_desktop_foreground=desktop_foreground
         blocked=self.fullscreen_active()
         if clock_should_show(self.clock_on.get(),foreground,self.clock_hwnd,buf.value,visible,
@@ -476,9 +472,7 @@ class Widgets:
                 # SW_SHOWNOACTIVATE plus SWP_NOACTIVATE restores above the wallpaper
                 # without making this widget the foreground application.
                 u.ShowWindow(self.clock_hwnd,4)
-                is_desktop = buf.value in ('Progman', 'WorkerW', 'SHELLDLL_DefView', 'SysListView32', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd')
-                insert_after = 0 if is_desktop or not foreground or foreground == self.clock_hwnd else foreground
-                u.SetWindowPos(self.clock_hwnd,insert_after,x,y,0,0,0x0011)
+                u.SetWindowPos(self.clock_hwnd,0,x,y,0,0,0x0011)
         elif visible:self.clock.withdraw()
         if visible and now-self.last_position_check>1:
             self.place_clock(self.clock.winfo_x(),self.clock.winfo_y())
