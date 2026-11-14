@@ -120,7 +120,8 @@ class Widgets:
         self.preview=None
         self.draw_clock()
         self.bar = tk.Toplevel(self.root); self.bar.withdraw(); self.bar.overrideredirect(True)
-        self.bar.configure(bg='#18202D'); self.bar.attributes('-topmost',True)
+        self.bar.configure(bg='#151B26'); self.bar.attributes('-topmost',True)
+        self.bar.attributes('-alpha', 0.88)
         self.expanded = set(); self.busy=False; self.last_inside=time.monotonic(); self.last_theme=0; self.last_clock=''
         self.edge_since = None
         self.edge_monitor = None
@@ -272,13 +273,26 @@ class Widgets:
                 c.create_polygon(r,0,width-r,0,width,0,width,r,width,height-r,width,height,width-r,height,r,height,0,height,0,height-r,0,r,0,0,fill=st['background'],smooth=True,splinesteps=24)
             else:c.create_rectangle(0,0,width,height,fill=st['background'],outline='')
         shadow=None
-        if self.adaptive.get() and self.palette and st['shape']=='透明':
-            fg,shadow=self.palettes[self.palette]
-        def lettering(x,y,**options):
-            if shadow:
-                offset=2 if self.palette=='light' else 1
-                c.create_text(x+offset,y+offset,**dict(options,fill=shadow))
-            c.create_text(x,y,**options)
+        is_transparent = st['shape'] == '透明'
+        if self.adaptive.get() and self.palette and is_transparent:
+            fg, shadow = self.palettes[self.palette]
+        elif is_transparent:
+            # 自动计算前景色亮度，生成最细腻的互补微阴影，确保在任何复杂亮/暗壁纸上都清晰可读
+            try:
+                rgb = c.winfo_rgb(fg)
+                lum = (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000
+                shadow = '#0b0f19' if lum > 32768 else '#ffffff'
+            except Exception:
+                shadow = '#0b0f19'
+
+        def lettering(x, y, **options):
+            if is_transparent and shadow:
+                # 4方向微光晕 + 右下立体微投影，文字浮雕质感更强
+                for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (1, 1)):
+                    c.create_text(x + dx, y + dy, **dict(options, fill=shadow))
+            elif shadow:
+                c.create_text(x + 1, y + 1, **dict(options, fill=shadow))
+            c.create_text(x, y, **options)
         if horizontal and dw:
             total=tw+dw+pad;x=(width-total)/2
             lettering(x,(height-extra)/2,text=clock,font=f,fill=fg,anchor='w')
@@ -313,7 +327,10 @@ class Widgets:
         for key,label,lo,hi in [('size','时间字号',16,160),('date_size','日期字号',10,60),('padding','留白大小',5,60),('opacity','不透明度',30,100)]:
             var=tk.IntVar(value=self.style[key]);variables[key]=var
             tk.Scale(row(label),from_=lo,to=hi,orient='horizontal',variable=var,command=apply,showvalue=True,length=340).pack(side='left',fill='x',expand=True)
-        for key,label,values in [('font','字体',sorted(set(tkfont.families()))),('shape','形状',['透明','矩形卡片','圆角卡片','圆形']),('layout','排列',['上下排列','左右排列'])]:
+        all_families = sorted(set(tkfont.families()))
+        preferred = ['Bahnschrift', 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei UI', 'Consolas', 'Arial']
+        font_choices = [f for f in preferred if f in all_families] + [f for f in all_families if f not in preferred]
+        for key,label,values in [('font','字体',font_choices),('shape','形状',['透明','矩形卡片','圆角卡片','圆形']),('layout','排列',['上下排列','左右排列'])]:
             var=tk.StringVar(value=self.style[key]);variables[key]=var
             cb=ttk.Combobox(row(label),textvariable=var,values=values,state='readonly',width=30);cb.pack(side='left');cb.bind('<<ComboboxSelected>>',apply)
         def choose(key):
@@ -354,8 +371,11 @@ class Widgets:
         width=self.clock.winfo_reqwidth();height=self.clock.winfo_reqheight()
         x=max(l,min(x,r-width));y=max(t,min(y,b-height))
         if snap:
+            center_x = (l + r) // 2
+            clock_center_x = x + width // 2
             if abs(x-l)<18:x=l
             elif abs(x+width-r)<18:x=max(l,r-width)
+            elif abs(clock_center_x - center_x) < 22:x = center_x - width // 2
             if abs(y-t)<18:y=t
             elif abs(y+height-b)<18:y=max(t,b-height)
         u.SetWindowPos(self.clock_hwnd,None,x,y,0,0,0x0015)
@@ -435,14 +455,17 @@ class Widgets:
         if text!=self.last_clock:
             self.draw_clock();self.last_clock=text
             if self.preview and self.preview.winfo_exists():self.draw_clock(self.preview)
+        visible=bool(self.clock.winfo_viewable())
         foreground=u.GetForegroundWindow()
         buf=ctypes.create_unicode_buffer(128);u.GetClassNameW(foreground,buf,128)
         desktop_foreground=foreground if buf.value in ('WorkerW','Progman') else None
         if desktop_foreground and desktop_foreground!=self.last_desktop_foreground:
             self.app.invalidate_desktop()
+            # 用户按 Win+D 或切回桌面时，强制纠正 Z 序确保紧贴在桌面壁纸最上层
+            if visible:
+                u.SetWindowPos(self.clock_hwnd, 0, 0, 0, 0, 0, 0x0013)
         self.last_desktop_foreground=desktop_foreground
         blocked=self.fullscreen_active()
-        visible=bool(self.clock.winfo_viewable())
         if clock_should_show(self.clock_on.get(),foreground,self.clock_hwnd,buf.value,visible,
                              self.app.desktop_icons_visible(),blocked):
             if not visible:
