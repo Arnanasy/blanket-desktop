@@ -1,3 +1,4 @@
+from pathlib import Path
 import ctypes
 from ctypes import wintypes
 
@@ -162,7 +163,11 @@ class TrayIcon:
         self._old_proc = self._u.SetWindowLongPtrW(
             self.hwnd, GWLP_WNDPROC, addr)
 
-        self._icon = self._make_icon()
+        load = self._u.LoadImageW
+        load.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        load.restype = wintypes.HICON
+        self._icon = load(None, str(Path(__file__).with_name("时隙.ico")), 1,
+                          self._u.GetSystemMetrics(49), self._u.GetSystemMetrics(50), 0x10) or self._make_icon()
         self._add_icon()
 
     def _add_icon(self):
