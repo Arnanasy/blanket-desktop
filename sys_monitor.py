@@ -119,10 +119,16 @@ class SystemMonitor:
         self.fade=None
         self.sampler=Sampler()
         self.text=''
+        self.readings={}
+        self.save_timer=None
+        self.controls={}
         widgets.cfg['monitor']=self.cfg
 
     def render(self):
         cfg=self.cfg
+        self.text='\n'.join(self.readings.get(k,label+'    —') for k,label,enabled in
+                            [('cpu','CPU',cfg['cpu']),('memory','内存',cfg['memory']),
+                             ('down','↓',cfg['net']),('up','↑',cfg['net'])] if enabled)
         self.font.configure(size=cfg['size'])
         lines=self.text.splitlines() or ['—']
         width=max(self.font.measure(t) for t in lines)+32
@@ -151,17 +157,35 @@ class SystemMonitor:
             self.cfg['position']=self.place(event.x_root-self.drag_offset[0],event.y_root-self.drag_offset[1])
     def release(self,event):
         self.drag_offset=None
-        self.widgets.save()
+        if self.dialog is None:
+            self.queue_save()
     def wheel(self,event):
         if not event.delta:return
         key,step,lo,hi=('size',1,9,48) if event.state&4 else ('alpha',5,30,100)
         self.cfg[key]=max(lo,min(hi,self.cfg[key]+(step if event.delta>0 else -step)))
+        if key in self.controls:
+            self.controls[key].set(self.cfg[key])
         self.apply()
+        if self.dialog is None:
+            self.queue_save()
         return 'break'
     def apply(self):
         self.win.attributes('-alpha',self.cfg['alpha']/100)
-        self.last_sample=0
+        self.render()
+
+    def queue_save(self):
+        if self.save_timer is not None:
+            self.win.after_cancel(self.save_timer)
+        self.save_timer=self.win.after(300,self.flush_save)
+
+    def flush_save(self):
+        self.save_timer=None
         self.widgets.save()
+
+    def sample(self,now):
+        lines=self.sampler.read(dict(cpu=True,memory=True,net=True),now).splitlines()
+        self.readings=dict(zip(('cpu','memory','down','up'),lines))
+        self.last_sample=now
 
     def settings(self,event):
         if self.dialog and self.dialog.winfo_exists():
@@ -170,8 +194,31 @@ class SystemMonitor:
         d=self.dialog=tk.Toplevel(self.widgets.root)
         d.title('系统监控外观')
         box=ttk.Frame(d,padding=14);box.pack()
-        vars={}
+        committed=self.widgets.cfg['monitor']
+        self.cfg=committed.copy()
+        vars=self.controls={}
+
+        def finish(accept):
+            if accept:
+                for key,var in vars.items():
+                    self.cfg[key]=var.get()
+                if not any(self.cfg[key] for key in ('cpu','memory','net')):
+                    self.cfg['cpu']=True
+                committed.update(self.cfg)
+            self.cfg=committed
+            self.dialog=None
+            self.controls={}
+            d.destroy()
+            self.apply()
+            if accept:
+                if self.save_timer is not None:
+                    self.win.after_cancel(self.save_timer)
+                self.flush_save()
+
+        d.protocol('WM_DELETE_WINDOW',lambda:finish(False))
+        d.bind('<Escape>',lambda event:finish(False))
         def change(*args):
+            if self.dialog is not d:return
             for k,var in vars.items():self.cfg[k]=var.get()
             if not any(self.cfg[k] for k in ('cpu','memory','net')):
                 vars['cpu'].set(True);self.cfg['cpu']=True
@@ -195,10 +242,15 @@ class SystemMonitor:
             ttk.Checkbutton(box,text=title,variable=vars[key],command=change).pack(anchor='w')
         ttk.Label(box,text='与启动栏共用右边缘时，监控占上半段。').pack(pady=5)
 
+        actions=ttk.Frame(box)
+        actions.pack(fill='x',pady=6)
+        ttk.Button(actions,text='取消',command=lambda:finish(False)).pack(side='right')
+        ttk.Button(actions,text='确定',command=lambda:finish(True)).pack(side='right',padx=5)
+
     def show(self,x,y,now):
         self.visible=True
         self.sampler=Sampler()
-        self.text=self.sampler.read(self.cfg,now)
+        self.sample(now)
         self.last_sample=self.last_inside=now
         self.render()
         l,t,r,b=self.bounds(x,y,work=True)
@@ -213,7 +265,7 @@ class SystemMonitor:
 
     def tick(self,now,x,y,monitor,blocked,bar_enabled):
         l,t,r,b=monitor
-        edge=(x<=l+2 if self.cfg['edge']=='左' else x>=r-3 and (not bar_enabled or y<(t+b)//2))
+        edge=(x==l if self.cfg['edge']=='左' else x>=r-3 and (not bar_enabled or y<(t+b)//2))
         if blocked or not edge:
             self.edge_start=None
         elif self.edge_start is None or self.edge_monitor!=monitor:
@@ -230,7 +282,7 @@ class SystemMonitor:
                 self.win.withdraw()
                 self.visible=False
             elif now-self.last_sample>=1:
-                self.text=self.sampler.read(self.cfg,now)
+                self.sample(now)
                 self.last_sample=now
                 self.render()
         return edge and self.cfg['edge']=='右'
