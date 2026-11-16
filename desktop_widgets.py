@@ -1,3 +1,4 @@
+from sys_monitor import SystemMonitor
 """Optional desktop clock and grouped edge launcher; standard library only."""
 import ctypes
 from ctypes import wintypes
@@ -124,6 +125,7 @@ class Widgets:
         self.last_desktop_foreground=None
         self.last_position_check = 0
         self.render_bar()
+        self.monitor = SystemMonitor(self, bounds)
         self.root.after(150,self.tick)
 
     def save(self):
@@ -478,7 +480,8 @@ class Widgets:
             self.place_clock(self.clock.winfo_x(),self.clock.winfo_y())
             self.last_position_check=now
         l,t,r,b=bounds(p.x,p.y)
-        edge=self.bar_on.get() and p.x>=r-3 and not blocked
+        monitor_edge = self.monitor.tick(now, p.x, p.y, (l,t,r,b), blocked, self.bar_on.get())
+        edge=self.bar_on.get() and p.x>=r-3 and not blocked and not monitor_edge
         monitor=(l,t,r,b)
         if not edge:
             self.edge_since=None
