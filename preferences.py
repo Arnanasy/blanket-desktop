@@ -57,23 +57,29 @@ DEFAULT_CONFIG = {
 
 def load_config():
     """读取配置，缺失或损坏时返回默认值。"""
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        merged = dict(DEFAULT_CONFIG)
-        if not isinstance(cfg, dict):
-            return merged
-        if isinstance(cfg.get("last_visible"),bool):
-            merged["last_visible"]=cfg["last_visible"]
-        if isinstance(cfg.get("auto"), bool):
-            merged["auto"] = cfg["auto"]
-        if cfg.get("zone") in ("top", "any", "corner"):
-            merged["zone"] = cfg["zone"]
-        if str(cfg.get("delay")) in ("5", "10", "20"):
-            merged["delay"] = str(cfg["delay"])
-        return merged
-    except (OSError, ValueError):
-        return dict(DEFAULT_CONFIG)
+    def read_dict(path):
+        try:
+            with open(path, encoding="utf-8-sig") as source:
+                data = json.load(source)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    cfg = read_dict(CONFIG_PATH)
+    merged = dict(cfg)
+    merged.update(DEFAULT_CONFIG)
+    if not isinstance(merged.get("widgets"), dict):
+        legacy = os.path.join(os.path.dirname(CONFIG_PATH), "desktop_widgets.json")
+        merged["widgets"] = read_dict(legacy)
+    if isinstance(cfg.get("last_visible"),bool):
+        merged["last_visible"]=cfg["last_visible"]
+    if isinstance(cfg.get("auto"), bool):
+        merged["auto"] = cfg["auto"]
+    if cfg.get("zone") in ("top", "any", "corner"):
+        merged["zone"] = cfg["zone"]
+    if str(cfg.get("delay")) in ("5", "10", "20"):
+        merged["delay"] = str(cfg["delay"])
+    return merged
 
 
 def save_config(cfg):

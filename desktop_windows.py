@@ -142,11 +142,47 @@ def invalidate_cache():
     global _desktop_cache
     _desktop_cache = (None, None)
 
-class LVHITTESTINFO(ctypes.Structure):
-    _fields_ = [
-        ("pt", wintypes.POINT), ("flags", wintypes.UINT),
-        ("iItem", ctypes.c_int), ("iSubItem", ctypes.c_int),
-    ]
+class Variant(ctypes.Structure):
+    # VARIANT's union also holds a record consisting of two pointers.
+    _fields_ = [("vt", ctypes.c_ushort), ("reserved", ctypes.c_ushort * 3),
+                ("payload", ctypes.c_void_p * 2)]
+
+
+def accessible_blank(point):
+    """Inspect the accessibility object under a confirmed desktop list view."""
+    ole32 = ctypes.windll.ole32
+    status = ole32.CoInitializeEx(None, 2)
+    if status not in (0, 1, -2147417850):  # already initialized in another apartment is also usable
+        return None
+    try:
+        return _accessible_list_background(point)
+    finally:
+        if status in (0, 1):
+            ole32.CoUninitialize()
+
+
+def _accessible_list_background(point):
+    oleacc = ctypes.windll.oleacc
+    get_object = oleacc.AccessibleObjectFromPoint
+    ptr = ctypes.c_void_p
+    get_object.argtypes = [wintypes.POINT, ctypes.POINTER(ptr), ctypes.POINTER(Variant)]
+    obj = ptr()
+    child = Variant()
+    role = Variant()
+    if get_object(point, ctypes.byref(obj), ctypes.byref(child)) != 0 or not obj:
+        return None
+    table = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ptr))).contents
+    release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ptr)(table[2])
+    get_role = ctypes.WINFUNCTYPE(ctypes.c_long, ptr, Variant, ctypes.POINTER(Variant))(table[13])
+    try:
+        if get_role(obj, child, ctypes.byref(role)) != 0 or role.vt != 3:
+            return None
+        # ROLE_SYSTEM_LIST is the background; list items and unknown roles never toggle.
+        return role.payload[0] == 0x21
+    finally:
+        ctypes.windll.oleaut32.VariantClear(ctypes.byref(role))
+        ctypes.windll.oleaut32.VariantClear(ctypes.byref(child))
+        release(obj)
 
 
 class DesktopClick:
@@ -157,7 +193,8 @@ class DesktopClick:
     SMTO_ABORTIFHUNG = 0x0002
     DRAG_THRESHOLD = 6   # 按下到松开位移超过此值视为框选，不触发
 
-    def __init__(self):
+    def __init__(self, on_unavailable=None):
+        self.on_unavailable = on_unavailable
         self._u = ctypes.windll.user32
         self._held = False
         self._down_blank = False
@@ -171,13 +208,6 @@ class DesktopClick:
         u.WindowFromPoint.argtypes = [wintypes.POINT]
         u.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR,
                                     ctypes.c_int]
-        u.ScreenToClient.argtypes = [wintypes.HWND,
-                                     ctypes.POINTER(wintypes.POINT)]
-        u.SendMessageTimeoutW.restype = wintypes.BOOL
-        u.SendMessageTimeoutW.argtypes = [
-            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, ctypes.c_void_p,
-            wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
-
     def check(self):
         """主线程每次 poll 调用一次，返回 True 表示这次点了桌面空白。"""
         down = bool(self._u.GetAsyncKeyState(self.VK_LBUTTON) & 0x8000)
@@ -196,45 +226,14 @@ class DesktopClick:
 
     def _is_blank_click(self, x, y):
         hwnd = self._u.WindowFromPoint(wintypes.POINT(x, y))
-        buf = ctypes.create_unicode_buffer(256)
-        self._u.GetClassNameW(hwnd, buf, 256)
-        cls = buf.value
-        if cls == "SHELLDLL_DefView":
-            return True   # 图标隐藏状态，点桌面即空白
-        if cls == "SysListView32" and hwnd == find_desktop_listview():
-            return self._hittest_blank(hwnd, x, y)
+        shell, lv = find_desktop_windows()
+        if hwnd and hwnd == shell:
+            return True
+        if hwnd and hwnd == lv:
+            result = accessible_blank(wintypes.POINT(x, y))
+            if result is None and not getattr(self, "_warned", False):
+                self._warned = True
+                if self.on_unavailable:
+                    self.on_unavailable()
+            return result is True
         return False
-
-    def _hittest_blank(self, lv, x, y):
-        p = wintypes.POINT(x, y)
-        self._u.ScreenToClient(lv, ctypes.byref(p))
-        # LVM_HITTEST is not marshalled by Windows: allocate in Explorer.
-        k = ctypes.windll.kernel32
-        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        k.OpenProcess.restype = wintypes.HANDLE
-        k.VirtualAllocEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
-        k.VirtualAllocEx.restype = ctypes.c_void_p
-        k.WriteProcessMemory.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
-        k.VirtualFreeEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD]
-        k.CloseHandle.argtypes = [wintypes.HANDLE]
-        self._u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
-        pid = wintypes.DWORD()
-        self._u.GetWindowThreadProcessId(lv, ctypes.byref(pid))
-        process = k.OpenProcess(0x0028, False, pid.value)
-        if not process:
-            return False
-        remote = None
-        try:
-            hti = LVHITTESTINFO()
-            hti.pt = p
-            remote = k.VirtualAllocEx(process, None, 64, 0x3000, 0x04)
-            if not remote or not k.WriteProcessMemory(process, remote, ctypes.byref(hti), ctypes.sizeof(hti), None):
-                return False
-            result = ctypes.c_size_t()
-            ok = self._u.SendMessageTimeoutW(lv, self.LVM_HITTEST, 0, remote,
-                                            self.SMTO_ABORTIFHUNG, 40, ctypes.byref(result))
-            return bool(ok and ctypes.c_int32(result.value & 0xffffffff).value == -1)
-        finally:
-            if remote:
-                k.VirtualFreeEx(process, remote, 0, 0x8000)
-            k.CloseHandle(process)

@@ -1,7 +1,7 @@
 """Optional desktop clock and grouped edge launcher; standard library only."""
 import ctypes
 from ctypes import wintypes
-import json
+from preferences import save_config
 import os
 from pathlib import Path
 from threading import Thread
@@ -50,11 +50,8 @@ def bounds(x, y, work=False):
 class Widgets:
     def __init__(self, app):
         self.app = app; self.root = app.root
-        self.path = Path(__file__).with_name('desktop_widgets.json')
-        try:
-            self.cfg = json.loads(self.path.read_text(encoding='utf-8'))
-            if not isinstance(self.cfg,dict): self.cfg = {}
-        except (ValueError,OSError): self.cfg = {}
+        self.cfg = app.cfg['widgets']
+        self.font_key = None
         self.groups = self.cfg.get('groups',{})
         if not isinstance(self.groups,dict): self.groups = {}
         self.groups = {k:[p for p in v if isinstance(p,str)] for k,v in self.groups.items() if isinstance(k,str) and isinstance(v,list)}
@@ -127,16 +124,14 @@ class Widgets:
         self.last_desktop_foreground=None
         self.last_position_check = 0
         self.render_bar()
-        self.root.after(50,self.tick)
+        self.root.after(150,self.tick)
 
     def save(self):
         self.cfg['weather_enabled']=self.weather_on.get()
         if self.weather:
             self.cfg['weather_cache']={k:self.weather[k] for k in ('line','updated','place','source','station') if k in self.weather}
         self.cfg.update(groups=self.groups,clock=self.clock_on.get(),bar=self.bar_on.get(),appearance=self.style,adaptive=self.adaptive.get(),recent=self.recent,wallpaper_palettes=self.palettes)
-        try:
-            tmp=self.path.with_suffix('.tmp'); tmp.write_text(json.dumps(self.cfg,ensure_ascii=False,indent=2),encoding='utf-8'); tmp.replace(self.path)
-        except OSError: pass
+        save_config(self.app.cfg)
 
     def wheel(self,event):
         if not event.delta:return
@@ -246,8 +241,12 @@ class Widgets:
         fg=self.accent if st['follow'] else st['color']
         clock=time.strftime('%H:%M:%S' if st['seconds'] else '%H:%M')
         date=time.strftime('%m月%d日')+'  星期'+ '一二三四五六日'[time.localtime().tm_wday]
-        f=tkfont.Font(family=st['font'],size=st['size'],weight='bold' if st['bold'] else 'normal')
-        df=tkfont.Font(family=st['font'],size=st['date_size'])
+        key = (st['font'], st['size'], st['bold'], st['date_size'])
+        if key != self.font_key:
+            self.time_font = tkfont.Font(family=key[0], size=key[1], weight='bold' if key[2] else 'normal')
+            self.date_font = tkfont.Font(family=key[0], size=key[3])
+            self.font_key = key
+        f, df = self.time_font, self.date_font
         tw,th=f.measure(clock),f.metrics('linespace');dw,dh=(df.measure(date),df.metrics('linespace')) if st['date'] else (0,0)
         pad=st['padding']; horizontal=st['layout']=='左右排列'
         width=(tw+dw+pad if horizontal and dw else max(tw,dw))+pad*2
@@ -388,10 +387,8 @@ class Widgets:
         u.SetWindowPos(self.clock_hwnd,1,0,0,0,0,0x0013)
         self.save();self.sample_wallpaper()
 
-    def fullscreen_active(self):
-        hwnd=u.GetForegroundWindow();name=ctypes.create_unicode_buffer(128)
-        u.GetClassNameW(hwnd,name,128)
-        if not hwnd or name.value in ('Progman','WorkerW','Shell_TrayWnd','Shell_SecondaryTrayWnd'):
+    def fullscreen_active(self, hwnd, name):
+        if not hwnd or name in ('Progman','WorkerW','Shell_TrayWnd','Shell_SecondaryTrayWnd'):
             return False
         rect=wintypes.RECT()
         if not u.GetWindowRect(hwnd,ctypes.byref(rect)):return False
@@ -463,7 +460,7 @@ class Widgets:
         if desktop_foreground and desktop_foreground!=self.last_desktop_foreground:
             self.app.invalidate_desktop()
         self.last_desktop_foreground=desktop_foreground
-        blocked=self.fullscreen_active()
+        blocked=self.fullscreen_active(foreground, buf.value)
         if clock_should_show(self.clock_on.get(),foreground,self.clock_hwnd,buf.value,visible,
                              self.app.desktop_icons_visible(),blocked):
             if not visible:
@@ -495,4 +492,4 @@ class Widgets:
             inside=self.bar.winfo_x()<=p.x<self.bar.winfo_x()+self.bar.winfo_width() and self.bar.winfo_y()<=p.y<self.bar.winfo_y()+self.bar.winfo_height()
             if inside:self.last_inside=now
             if not self.busy and (not self.bar_on.get() or blocked or now-self.last_inside>0.9):self.bar.withdraw()
-        self.root.after(50,self.tick)
+        self.root.after(150,self.tick)

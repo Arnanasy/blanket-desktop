@@ -142,21 +142,21 @@ class App:
         tk.Label(root, text="快捷键 Ctrl + Alt + H 立即切换",
                  font=f_small, bg=BG, fg=SUBTEXT).pack(pady=(10, 2))
 
-        # 底部操作：隐藏窗口 / 退出程序
-        bottom = tk.Frame(root, bg=BG)
-        bottom.pack(side="bottom", before=root.winfo_children()[0], pady=6)
-        tk.Button(bottom, text="隐藏窗口", font=f_normal, bg="#E2E8F0",
-                  fg=TEXT, activebackground="#CBD5E1", relief="flat",
-                  borderwidth=0, cursor="hand2", width=10, pady=8,
-                  command=self.hide_window).pack(side="left", padx=6)
-        tk.Button(bottom, text="退出程序", font=f_normal, bg=RED,
-                  fg=WHITE, activebackground=RED_D, relief="flat",
-                  borderwidth=0, cursor="hand2", width=10, pady=8,
-                  command=self.quit_app).pack(side="left", padx=6)
+        actions = tk.Frame(root, bg=BG)
+        actions.pack(fill="x", padx=24, pady=(6, 12))
+        actions.columnconfigure((0, 1), weight=1, uniform="action")
+        def action(label, command, row, column, danger=False):
+            button = tk.Button(actions, text=label, command=command, font=f_normal,
+                               bg=RED if danger else "#E2E8F0", fg=WHITE if danger else TEXT,
+                               activebackground=RED_D if danger else "#CBD5E1",
+                               relief="flat", borderwidth=0, cursor="hand2", pady=7)
+            button.grid(row=row, column=column, sticky="ew", padx=3, pady=3)
+            return button
 
-        tk.Button(root, text="桌面组件设置", command=lambda: self.widgets.settings()).pack(pady=4)
-        self.pause_button = tk.Button(root, text="暂停自动隐藏", command=self.pause_auto)
-        self.pause_button.pack(pady=4)
+        action("桌面组件设置", lambda: self.widgets.settings(), 0, 0)
+        self.pause_button = action("暂停自动隐藏", self.pause_auto, 0, 1)
+        action("隐藏窗口", self.hide_window, 1, 0)
+        action("退出程序", self.quit_app, 1, 1, danger=True)
         self._paused = False
 
         # 运行状态
@@ -189,7 +189,7 @@ class App:
         ctypes.windll.wtsapi32.WTSRegisterSessionNotification(wintypes.HWND(top_hwnd),0)
 
         # 点桌面空白处切换图标显示/隐藏（优先使用钩子队列，安装失败时轮询）
-        self.desktop_click = DesktopClick()
+        self.desktop_click = DesktopClick(self._click_unavailable)
         self.mouse_events = MouseEvents()
         self._mouse_down = None
         self.widgets = Widgets(self)
@@ -201,6 +201,11 @@ class App:
         self.root.after(10, self.poll_mouse)
 
     # 每轮只消费钩子队列或执行左键轮询，两者互斥。
+    def _click_unavailable(self):
+        from tkinter import messagebox
+        self.root.after_idle(lambda: messagebox.showinfo(
+            "桌面点击", "Windows 暂时无法识别桌面空白。可用托盘图标或 Ctrl + Alt + H 切换。", parent=self.root))
+
     def poll_mouse(self):
         if self.mouse_events.hook:
             for _ in range(100):
