@@ -4,8 +4,6 @@ from sys_monitor import SystemMonitor
 """Optional desktop clock and grouped edge launcher; standard library only."""
 import ctypes
 from ctypes import wintypes
-import math
-from PIL import Image, ImageDraw
 from preferences import save_config
 import os
 from pathlib import Path
@@ -18,7 +16,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser, ttk, font as tkfont
 
 u = ctypes.windll.user32
-g = ctypes.windll.gdi32
+
 
 u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
@@ -30,115 +28,6 @@ u.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 u.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 u.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
 u.SetWindowLongPtrW.restype = ctypes.c_ssize_t
-u.GetDC.argtypes = [wintypes.HWND]
-u.GetDC.restype = wintypes.HDC
-u.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
-u.ReleaseDC.restype = ctypes.c_int
-
-g.CreateCompatibleDC.argtypes = [wintypes.HDC]
-g.CreateCompatibleDC.restype = wintypes.HDC
-g.DeleteDC.argtypes = [wintypes.HDC]
-g.DeleteDC.restype = wintypes.BOOL
-g.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
-g.SelectObject.restype = wintypes.HGDIOBJ
-g.DeleteObject.argtypes = [wintypes.HGDIOBJ]
-g.DeleteObject.restype = wintypes.BOOL
-
-class BLENDFUNCTION(ctypes.Structure):
-    _fields_ = [
-        ('BlendOp', ctypes.c_byte),
-        ('BlendFlags', ctypes.c_byte),
-        ('SourceConstantAlpha', ctypes.c_byte),
-        ('AlphaFormat', ctypes.c_byte),
-    ]
-
-class BITMAPINFOHEADER(ctypes.Structure):
-    _fields_ = [
-        ('biSize', wintypes.DWORD),
-        ('biWidth', wintypes.LONG),
-        ('biHeight', wintypes.LONG),
-        ('biPlanes', wintypes.WORD),
-        ('biBitCount', wintypes.WORD),
-        ('biCompression', wintypes.DWORD),
-        ('biSizeImage', wintypes.DWORD),
-        ('biXPelsPerMeter', wintypes.LONG),
-        ('biYPelsPerMeter', wintypes.LONG),
-        ('biClrUsed', wintypes.DWORD),
-        ('biClrImportant', wintypes.DWORD),
-    ]
-
-class BITMAPINFO(ctypes.Structure):
-    _fields_ = [
-        ('bmiHeader', BITMAPINFOHEADER),
-        ('bmiColors', wintypes.DWORD * 3)
-    ]
-
-g.CreateDIBSection.argtypes = [
-    wintypes.HDC, ctypes.POINTER(BITMAPINFO), wintypes.UINT, ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD
-]
-g.CreateDIBSection.restype = wintypes.HBITMAP
-
-u.UpdateLayeredWindow.argtypes = [
-    wintypes.HWND, wintypes.HDC, ctypes.POINTER(wintypes.POINT), ctypes.POINTER(wintypes.SIZE),
-    wintypes.HDC, ctypes.POINTER(wintypes.POINT), wintypes.COLORREF, ctypes.POINTER(BLENDFUNCTION), wintypes.DWORD
-]
-
-def render_theme_icon(dark, size=48, scale=4):
-    """Pillow 4倍超采样抗锯齿绘制极简现代风太阳/弯月图标。"""
-    S = size * scale
-    img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    pad = 2 * scale
-
-    if dark:
-        bg_color = (24, 32, 47, 220)        # 沉稳半透明毛玻璃暗底
-        border_color = (255, 255, 255, 38)  # 极细反光描边
-    else:
-        bg_color = (255, 255, 255, 230)     # 通透半透明白玉底
-        border_color = (200, 210, 225, 120) # 柔和微灰描边
-
-    d.ellipse([pad, pad, S - pad, S - pad], fill=bg_color, outline=border_color, width=max(1, int(1.2 * scale)))
-    cx, cy = S / 2.0, S / 2.0
-
-    if dark:
-        moon_layer = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-        md = ImageDraw.Draw(moon_layer)
-        moon_r = 13.0 * scale
-        mcx, mcy = cx - 0.5 * scale, cy + 0.5 * scale
-        md.ellipse([mcx - moon_r, mcy - moon_r, mcx + moon_r, mcy + moon_r], fill=(226, 232, 240, 255))
-        cut_r = 11.5 * scale
-        cut_cx = mcx + 6.2 * scale
-        cut_cy = mcy - 4.5 * scale
-        md.ellipse([cut_cx - cut_r, cut_cy - cut_r, cut_cx + cut_r, cut_cy + cut_r], fill=(0, 0, 0, 0))
-
-        star_cx, star_cy = cx + 8.5 * scale, cy - 8.0 * scale
-        star_r = 2.4 * scale
-        for i in range(4):
-            ang = i * math.pi / 2.0
-            x1 = star_cx + math.cos(ang) * star_r
-            y1 = star_cy + math.sin(ang) * star_r
-            md.line([(star_cx, star_cy), (x1, y1)], fill=(226, 232, 240, 235), width=max(1, int(1.2 * scale)))
-        img.alpha_composite(moon_layer)
-    else:
-        sun_color = (245, 158, 11, 255)
-        sun_r = 7.5 * scale
-        d.ellipse([cx - sun_r, cy - sun_r, cx + sun_r, cy + sun_r], fill=sun_color)
-        ray_in = 10.5 * scale
-        ray_out = 14.5 * scale
-        ray_width = max(1, int(2.2 * scale))
-        for i in range(8):
-            ang = i * (math.pi / 4.0)
-            x1 = cx + math.cos(ang) * ray_in
-            y1 = cy + math.sin(ang) * ray_in
-            x2 = cx + math.cos(ang) * ray_out
-            y2 = cy + math.sin(ang) * ray_out
-            d.line([(x1, y1), (x2, y2)], fill=sun_color, width=ray_width)
-            cap_r = ray_width / 2.0
-            d.ellipse([x1 - cap_r, y1 - cap_r, x1 + cap_r, y1 + cap_r], fill=sun_color)
-            d.ellipse([x2 - cap_r, y2 - cap_r, x2 + cap_r, y2 + cap_r], fill=sun_color)
-
-    return img.resize((size, size), Image.Resampling.LANCZOS)
-
 def clock_should_show(enabled, foreground, clock_hwnd, class_name, was_visible, icons_visible=None, fullscreen=False):
     if not enabled or icons_visible is not False:
         return False
@@ -237,15 +126,20 @@ class Widgets:
         self._theme_press_y = self.theme_cur_y
         self._theme_dragging = False
         self._theme_dark = None
-        self._theme_dc = None
-        self._theme_bmp = None
-        self._theme_old_bmp = None
+        self.theme_images = {
+            dark: tk.PhotoImage(master=self.root, file=str(Path(__file__).with_name(name)))
+            for dark, name in ((True, 'theme-moon.png'), (False, 'theme-sun.png'))
+        }
 
         self.theme_btn = tk.Toplevel(self.root)
         self.theme_btn.withdraw()
         self.theme_btn.overrideredirect(True)
         self.theme_btn.geometry(f'{self.theme_size}x{self.theme_size}+0+0')
-        self.theme_btn.configure(cursor='hand2')
+        key_color = '#010203'
+        self.theme_btn.configure(cursor='hand2', bg=key_color)
+        self.theme_btn.attributes('-transparentcolor', key_color, '-topmost', True)
+        self.theme_label = tk.Label(self.theme_btn, bg=key_color, borderwidth=0, highlightthickness=0)
+        self.theme_label.pack(fill='both', expand=True)
         self.theme_btn.bind('<Enter>', self._theme_on_enter)
         self.theme_btn.bind('<ButtonPress-1>', self._theme_on_press)
         self.theme_btn.bind('<B1-Motion>', self._theme_on_motion)
@@ -254,8 +148,7 @@ class Widgets:
         self.theme_btn.update_idletasks()
         self.theme_hwnd = u.GetAncestor(self.theme_btn.winfo_id(), 2)
         exstyle = u.GetWindowLongPtrW(self.theme_hwnd, -20)
-        # WS_EX_LAYERED(0x80000) | WS_EX_NOACTIVATE(0x08000000) | WS_EX_TOOLWINDOW(0x80) | WS_EX_TOPMOST(0x08)
-        u.SetWindowLongPtrW(self.theme_hwnd, -20, exstyle | 0x00080000 | 0x08000000 | 0x80 | 0x08)
+        u.SetWindowLongPtrW(self.theme_hwnd, -20, exstyle | 0x08000000 | 0x80)
         self.draw_theme_button()
 
         self.bar = tk.Toplevel(self.root); self.bar.withdraw(); self.bar.overrideredirect(True)
@@ -546,49 +439,9 @@ class Widgets:
 
     def draw_theme_button(self, force=False):
         dark = self._system_dark()
-        if self._theme_dark == dark and not force and self._theme_bmp:
-            return
-        self._theme_dark = dark
-        img = render_theme_icon(dark, size=self.theme_size, scale=4)
-        raw = img.tobytes('raw', 'BGRA')
-        arr = bytearray(raw)
-        for i in range(0, len(arr), 4):
-            b, g_val, r, a = arr[i], arr[i+1], arr[i+2], arr[i+3]
-            if a == 0:
-                arr[i] = arr[i+1] = arr[i+2] = 0
-            elif a < 255:
-                arr[i] = (b * a + 127) // 255
-                arr[i+1] = (g_val * a + 127) // 255
-                arr[i+2] = (r * a + 127) // 255
-
-        if self._theme_bmp:
-            g.SelectObject(self._theme_dc, self._theme_old_bmp)
-            g.DeleteObject(self._theme_bmp)
-            g.DeleteDC(self._theme_dc)
-            self._theme_bmp = None
-            self._theme_dc = None
-
-        hdc_screen = u.GetDC(0)
-        self._theme_dc = g.CreateCompatibleDC(hdc_screen)
-        bmi = BITMAPINFO()
-        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.bmiHeader.biWidth = self.theme_size
-        bmi.bmiHeader.biHeight = -self.theme_size
-        bmi.bmiHeader.biPlanes = 1
-        bmi.bmiHeader.biBitCount = 32
-        ppv_bits = ctypes.c_void_p()
-        self._theme_bmp = g.CreateDIBSection(self._theme_dc, ctypes.byref(bmi), 0, ctypes.byref(ppv_bits), None, 0)
-        ctypes.memmove(ppv_bits, bytes(arr), len(arr))
-        self._theme_old_bmp = g.SelectObject(self._theme_dc, self._theme_bmp)
-
-        pt_dst = wintypes.POINT(int(self.theme_cur_x), int(self.theme_cur_y))
-        size = wintypes.SIZE(self.theme_size, self.theme_size)
-        pt_src = wintypes.POINT(0, 0)
-        blend = BLENDFUNCTION(0, 0, 255, 1)
-
-        u.UpdateLayeredWindow(self.theme_hwnd, hdc_screen, ctypes.byref(pt_dst), ctypes.byref(size),
-                             self._theme_dc, ctypes.byref(pt_src), 0, ctypes.byref(blend), 2)
-        u.ReleaseDC(0, hdc_screen)
+        if force or self._theme_dark != dark:
+            self.theme_label.configure(image=self.theme_images[dark])
+            self._theme_dark = dark
 
     def refresh_theme_button(self, force=False):
         if force or self._system_dark() != self._theme_dark:
@@ -637,7 +490,7 @@ class Widgets:
             dy = abs(e.y_root - self._theme_press_pt[1])
             if dx <= 6 and dy <= 6:
                 self.app.toggle_theme()
-                self.refresh_theme_button(force=True)
+
         self._theme_press_pt = None
         self.theme_last_hover = time.monotonic()
 
@@ -686,7 +539,7 @@ class Widgets:
         in_y_zone = (self.theme_cur_y - 16 <= p.y <= self.theme_cur_y + self.theme_size + 16)
 
         if not self.theme_expanded:
-            if p.x >= r - self.theme_peek - 8 and in_y_zone:
+            if r - self.theme_peek - 8 <= p.x < r and in_y_zone:
                 self._expand_theme_btn()
         else:
             hover = (self.theme_cur_x - 14 <= p.x <= r + 4 and in_y_zone)
@@ -698,7 +551,7 @@ class Widgets:
                 self._start_theme_anim()
 
         # 只要按钮展开或鼠标在按钮的纵向热区里，就告诉主循环别弹右侧启动栏
-        return self.theme_expanded or (p.x >= r - 12 and in_y_zone)
+        return self.theme_expanded or (r - 12 <= p.x < r and in_y_zone)
 
     def tick(self):
         now=time.monotonic(); p=wintypes.POINT(); u.GetCursorPos(ctypes.byref(p))
@@ -730,8 +583,8 @@ class Widgets:
         theme_edge = False
         if (self.theme_btn_always.get() or self.app.desktop_icons_visible() is False) and not blocked:
             if not self.theme_btn.winfo_viewable():
+                self.theme_btn.deiconify()
                 self.place_theme_button()
-                u.ShowWindow(self.theme_hwnd, 4)
                 u.SetWindowPos(self.theme_hwnd, -1, int(self.theme_cur_x), int(self.theme_cur_y),
                                self.theme_size, self.theme_size, 0x0010 | 0x0040)
             theme_edge = self._theme_tick(now, p, blocked)
@@ -742,7 +595,7 @@ class Widgets:
             self.place_clock(self.clock.winfo_x(),self.clock.winfo_y())
             self.last_position_check=now
         l,t,r,b=bounds(p.x,p.y)
-        monitor_edge = self.monitor.tick(now, p.x, p.y, (l,t,r,b), blocked, self.bar_on.get())
+        monitor_edge = self.monitor.tick(now, p.x, p.y, (l,t,r,b), blocked, self.bar_on.get(), suppress_edge=theme_edge)
         edge=self.bar_on.get() and p.x>=r-3 and not blocked and not monitor_edge and not theme_edge
         monitor=(l,t,r,b)
         if not edge:

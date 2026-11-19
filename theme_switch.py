@@ -2,13 +2,14 @@
 import ctypes
 from ctypes import wintypes
 import winreg
+from threading import Thread
 
 _KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
 
 _u = ctypes.windll.user32
 _u.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
                                     wintypes.LPCWSTR, wintypes.UINT, wintypes.UINT,
-                                    ctypes.POINTER(wintypes.DWORD)]
+                                    ctypes.POINTER(ctypes.c_size_t)]
 
 
 def is_dark():
@@ -32,10 +33,14 @@ def set_theme(dark):
     except OSError:
         return False
     # 广播 WM_SETTINGCHANGE + ImmersiveColorSet，让所有应用和浏览器立即响应
-    result = wintypes.DWORD()
+    Thread(target=_notify, daemon=True).start()
+    return True
+
+
+def _notify():
+    result = ctypes.c_size_t()
     _u.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "ImmersiveColorSet",
                            0x0002, 1000, ctypes.byref(result))
-    return True
 
 
 def toggle():

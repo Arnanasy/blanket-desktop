@@ -266,9 +266,9 @@ class SystemMonitor:
             self.fade=self.win.after(20,brighten,step+1) if step<5 else None
         brighten(1)
 
-    def tick(self,now,x,y,monitor,blocked,bar_enabled):
+    def tick(self,now,x,y,monitor,blocked,bar_enabled,suppress_edge=False):
         l,t,r,b=monitor
-        edge=(x==l if self.cfg['edge']=='左' else x>=r-3 and (not bar_enabled or y<(t+b)//2))
+        edge=not suppress_edge and (x==l if self.cfg['edge']=='左' else x>=r-3 and (not bar_enabled or y<(t+b)//2))
         if blocked or not edge:
             self.edge_start=None
         elif self.edge_start is None or self.edge_monitor!=monitor:
