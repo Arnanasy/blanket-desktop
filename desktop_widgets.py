@@ -4,6 +4,8 @@ from sys_monitor import SystemMonitor
 """Optional desktop clock and grouped edge launcher; standard library only."""
 import ctypes
 from ctypes import wintypes
+import math
+from PIL import Image, ImageDraw
 from preferences import save_config
 import os
 from pathlib import Path
@@ -16,6 +18,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, colorchooser, ttk, font as tkfont
 
 u = ctypes.windll.user32
+g = ctypes.windll.gdi32
+
 u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 u.GetForegroundWindow.restype = wintypes.HWND
@@ -26,12 +30,118 @@ u.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
 u.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 u.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
 u.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+u.GetDC.argtypes = [wintypes.HWND]
+u.GetDC.restype = wintypes.HDC
+u.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+u.ReleaseDC.restype = ctypes.c_int
+
+g.CreateCompatibleDC.argtypes = [wintypes.HDC]
+g.CreateCompatibleDC.restype = wintypes.HDC
+g.DeleteDC.argtypes = [wintypes.HDC]
+g.DeleteDC.restype = wintypes.BOOL
+g.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+g.SelectObject.restype = wintypes.HGDIOBJ
+g.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+g.DeleteObject.restype = wintypes.BOOL
+
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [
+        ('BlendOp', ctypes.c_byte),
+        ('BlendFlags', ctypes.c_byte),
+        ('SourceConstantAlpha', ctypes.c_byte),
+        ('AlphaFormat', ctypes.c_byte),
+    ]
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ('biSize', wintypes.DWORD),
+        ('biWidth', wintypes.LONG),
+        ('biHeight', wintypes.LONG),
+        ('biPlanes', wintypes.WORD),
+        ('biBitCount', wintypes.WORD),
+        ('biCompression', wintypes.DWORD),
+        ('biSizeImage', wintypes.DWORD),
+        ('biXPelsPerMeter', wintypes.LONG),
+        ('biYPelsPerMeter', wintypes.LONG),
+        ('biClrUsed', wintypes.DWORD),
+        ('biClrImportant', wintypes.DWORD),
+    ]
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [
+        ('bmiHeader', BITMAPINFOHEADER),
+        ('bmiColors', wintypes.DWORD * 3)
+    ]
+
+g.CreateDIBSection.argtypes = [
+    wintypes.HDC, ctypes.POINTER(BITMAPINFO), wintypes.UINT, ctypes.POINTER(ctypes.c_void_p), wintypes.HANDLE, wintypes.DWORD
+]
+g.CreateDIBSection.restype = wintypes.HBITMAP
+
+u.UpdateLayeredWindow.argtypes = [
+    wintypes.HWND, wintypes.HDC, ctypes.POINTER(wintypes.POINT), ctypes.POINTER(wintypes.SIZE),
+    wintypes.HDC, ctypes.POINTER(wintypes.POINT), wintypes.COLORREF, ctypes.POINTER(BLENDFUNCTION), wintypes.DWORD
+]
+
+def render_theme_icon(dark, size=48, scale=4):
+    """Pillow 4倍超采样抗锯齿绘制极简现代风太阳/弯月图标。"""
+    S = size * scale
+    img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad = 2 * scale
+
+    if dark:
+        bg_color = (24, 32, 47, 220)        # 沉稳半透明毛玻璃暗底
+        border_color = (255, 255, 255, 38)  # 极细反光描边
+    else:
+        bg_color = (255, 255, 255, 230)     # 通透半透明白玉底
+        border_color = (200, 210, 225, 120) # 柔和微灰描边
+
+    d.ellipse([pad, pad, S - pad, S - pad], fill=bg_color, outline=border_color, width=max(1, int(1.2 * scale)))
+    cx, cy = S / 2.0, S / 2.0
+
+    if dark:
+        moon_layer = Image.new('RGBA', (S, S), (0, 0, 0, 0))
+        md = ImageDraw.Draw(moon_layer)
+        moon_r = 13.0 * scale
+        mcx, mcy = cx - 0.5 * scale, cy + 0.5 * scale
+        md.ellipse([mcx - moon_r, mcy - moon_r, mcx + moon_r, mcy + moon_r], fill=(226, 232, 240, 255))
+        cut_r = 11.5 * scale
+        cut_cx = mcx + 6.2 * scale
+        cut_cy = mcy - 4.5 * scale
+        md.ellipse([cut_cx - cut_r, cut_cy - cut_r, cut_cx + cut_r, cut_cy + cut_r], fill=(0, 0, 0, 0))
+
+        star_cx, star_cy = cx + 8.5 * scale, cy - 8.0 * scale
+        star_r = 2.4 * scale
+        for i in range(4):
+            ang = i * math.pi / 2.0
+            x1 = star_cx + math.cos(ang) * star_r
+            y1 = star_cy + math.sin(ang) * star_r
+            md.line([(star_cx, star_cy), (x1, y1)], fill=(226, 232, 240, 235), width=max(1, int(1.2 * scale)))
+        img.alpha_composite(moon_layer)
+    else:
+        sun_color = (245, 158, 11, 255)
+        sun_r = 7.5 * scale
+        d.ellipse([cx - sun_r, cy - sun_r, cx + sun_r, cy + sun_r], fill=sun_color)
+        ray_in = 10.5 * scale
+        ray_out = 14.5 * scale
+        ray_width = max(1, int(2.2 * scale))
+        for i in range(8):
+            ang = i * (math.pi / 4.0)
+            x1 = cx + math.cos(ang) * ray_in
+            y1 = cy + math.sin(ang) * ray_in
+            x2 = cx + math.cos(ang) * ray_out
+            y2 = cy + math.sin(ang) * ray_out
+            d.line([(x1, y1), (x2, y2)], fill=sun_color, width=ray_width)
+            cap_r = ray_width / 2.0
+            d.ellipse([x1 - cap_r, y1 - cap_r, x1 + cap_r, y1 + cap_r], fill=sun_color)
+            d.ellipse([x2 - cap_r, y2 - cap_r, x2 + cap_r, y2 + cap_r], fill=sun_color)
+
+    return img.resize((size, size), Image.Resampling.LANCZOS)
 
 def clock_should_show(enabled, foreground, clock_hwnd, class_name, was_visible, icons_visible=None, fullscreen=False):
-    # 仅在启用时钟且桌面图标处于隐藏状态时显示
     if not enabled or icons_visible is not False:
         return False
-    # 前台为全屏独占应用时隐藏，避免穿透或遮挡
     if fullscreen:
         return False
     return True
@@ -101,35 +211,53 @@ class Widgets:
         self.clock_label.bind('<Button-2>',lambda e:self.adjust('seconds',not self.style['seconds']))
         self.clock.update_idletasks()
         self.clock_hwnd = u.GetAncestor(self.clock.winfo_id(), 2)
-        # Tool window, without activation: showing the clock must not take focus
-        # away from Explorer and cause the next visibility check to hide it.
         exstyle = u.GetWindowLongPtrW(self.clock_hwnd, -20)
         u.SetWindowLongPtrW(self.clock_hwnd, -20, exstyle | 0x08000000 | 0x80)
         self.settings_window=None
         self.preview=None
         self.draw_clock()
-        # ☀/☾ 一键切换深浅主题的桌面小按钮（拖动可移位，右键打开设置）
-        tb=self.cfg.get('theme_btn',{})
-        self.theme_btn_always=tk.BooleanVar(value=tb.get('always',True) if isinstance(tb,dict) else True)
-        pos=tb.get('position') if isinstance(tb,dict) else None
-        if not (isinstance(pos,list) and len(pos)==2 and all(type(v) is int for v in pos)):
-            pos=[max(0,self.root.winfo_screenwidth()-72),12]
-        self.theme_pos=pos
-        self._theme_press=self._theme_drag=None
-        self._theme_dark=None
-        self.theme_btn=tk.Toplevel(self.root); self.theme_btn.withdraw(); self.theme_btn.overrideredirect(True)
-        self.theme_btn.configure(bg='#010203'); self.theme_btn.wm_attributes('-transparentcolor','#010203')
-        self.theme_canvas=tk.Canvas(self.theme_btn,bg='#010203',highlightthickness=0,cursor='hand2')
-        self.theme_canvas.pack()
-        self.theme_canvas.bind('<ButtonPress-1>',self.theme_drag_start)
-        self.theme_canvas.bind('<B1-Motion>',self.theme_drag)
-        self.theme_canvas.bind('<ButtonRelease-1>',self.theme_drag_end)
-        self.theme_canvas.bind('<Button-3>',lambda e:self.settings())
+
+        # ☀/☾ 一键切换深浅主题的桌面小按钮（边缘半隐藏、滑入置顶、事件直连不卡顿）
+        tb = self.cfg.get('theme_btn', {})
+        self.theme_btn_always = tk.BooleanVar(value=tb.get('always', True) if isinstance(tb, dict) else True)
+        pos = tb.get('position') if isinstance(tb, dict) else None
+        if not (isinstance(pos, list) and len(pos) == 2 and all(type(v) is int for v in pos)):
+            pos = [max(0, self.root.winfo_screenwidth() - 54), 100]
+        self.theme_pos = pos
+        self.theme_size = 48
+        self.theme_peek = 6       # 平时贴边半隐藏露出的细边宽度
+        self.theme_margin = 6     # 展开时距离屏幕右边缘的距离
+        self.theme_cur_x = float(pos[0])
+        self.theme_cur_y = float(pos[1])
+        self.theme_target_x = float(pos[0])
+        self.theme_expanded = False
+        self.theme_last_hover = 0.0
+        self.theme_animating = False
+        self._theme_press_pt = None
+        self._theme_press_y = self.theme_cur_y
+        self._theme_dragging = False
+        self._theme_dark = None
+        self._theme_dc = None
+        self._theme_bmp = None
+        self._theme_old_bmp = None
+
+        self.theme_btn = tk.Toplevel(self.root)
+        self.theme_btn.withdraw()
+        self.theme_btn.overrideredirect(True)
+        self.theme_btn.geometry(f'{self.theme_size}x{self.theme_size}+0+0')
+        self.theme_btn.configure(cursor='hand2')
+        self.theme_btn.bind('<Enter>', self._theme_on_enter)
+        self.theme_btn.bind('<ButtonPress-1>', self._theme_on_press)
+        self.theme_btn.bind('<B1-Motion>', self._theme_on_motion)
+        self.theme_btn.bind('<ButtonRelease-1>', self._theme_on_release)
+        self.theme_btn.bind('<ButtonRelease-3>', lambda e: self.settings())
         self.theme_btn.update_idletasks()
-        self.theme_hwnd=u.GetAncestor(self.theme_btn.winfo_id(),2)
-        exstyle=u.GetWindowLongPtrW(self.theme_hwnd,-20)
-        u.SetWindowLongPtrW(self.theme_hwnd,-20,exstyle|0x08000000|0x80)
+        self.theme_hwnd = u.GetAncestor(self.theme_btn.winfo_id(), 2)
+        exstyle = u.GetWindowLongPtrW(self.theme_hwnd, -20)
+        # WS_EX_LAYERED(0x80000) | WS_EX_NOACTIVATE(0x08000000) | WS_EX_TOOLWINDOW(0x80) | WS_EX_TOPMOST(0x08)
+        u.SetWindowLongPtrW(self.theme_hwnd, -20, exstyle | 0x00080000 | 0x08000000 | 0x80 | 0x08)
         self.draw_theme_button()
+
         self.bar = tk.Toplevel(self.root); self.bar.withdraw(); self.bar.overrideredirect(True)
         self.bar.configure(bg='#18202D'); self.bar.attributes('-topmost',True)
         self.expanded = set(); self.busy=False; self.last_inside=time.monotonic(); self.last_theme=0; self.last_clock=''
@@ -401,7 +529,6 @@ class Widgets:
         except OSError as e:messagebox.showerror('无法打开',str(e),parent=self.bar)
     def theme(self):
         self.sample_wallpaper()
-        # Follow Windows wallpaper-derived accent when automatic accent is enabled.
         color=wintypes.DWORD(); opaque=wintypes.BOOL()
         try:
             if ctypes.windll.dwmapi.DwmGetColorizationColor(ctypes.byref(color),ctypes.byref(opaque))==0:
@@ -416,38 +543,163 @@ class Widgets:
             return bool(is_dark())
         except Exception:
             return False
-    def draw_theme_button(self):
-        dark=self._system_dark()
-        self._theme_dark=dark
-        c=self.theme_canvas
-        c.configure(width=48,height=48)
-        c.delete('all')
-        c.create_oval(4,4,44,44,fill='#1E293B' if dark else '#FFF7E0',outline='#334155' if dark else '#F59E0B',width=2)
-        c.create_text(24,24,text='☾' if dark else '☀',font=('Segoe UI Symbol',20),fill='#E2E8F0' if dark else '#D97706')
-    def refresh_theme_button(self):
-        if self._system_dark()!=self._theme_dark:self.draw_theme_button()
+
+    def draw_theme_button(self, force=False):
+        dark = self._system_dark()
+        if self._theme_dark == dark and not force and self._theme_bmp:
+            return
+        self._theme_dark = dark
+        img = render_theme_icon(dark, size=self.theme_size, scale=4)
+        raw = img.tobytes('raw', 'BGRA')
+        arr = bytearray(raw)
+        for i in range(0, len(arr), 4):
+            b, g_val, r, a = arr[i], arr[i+1], arr[i+2], arr[i+3]
+            if a == 0:
+                arr[i] = arr[i+1] = arr[i+2] = 0
+            elif a < 255:
+                arr[i] = (b * a + 127) // 255
+                arr[i+1] = (g_val * a + 127) // 255
+                arr[i+2] = (r * a + 127) // 255
+
+        if self._theme_bmp:
+            g.SelectObject(self._theme_dc, self._theme_old_bmp)
+            g.DeleteObject(self._theme_bmp)
+            g.DeleteDC(self._theme_dc)
+            self._theme_bmp = None
+            self._theme_dc = None
+
+        hdc_screen = u.GetDC(0)
+        self._theme_dc = g.CreateCompatibleDC(hdc_screen)
+        bmi = BITMAPINFO()
+        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.bmiHeader.biWidth = self.theme_size
+        bmi.bmiHeader.biHeight = -self.theme_size
+        bmi.bmiHeader.biPlanes = 1
+        bmi.bmiHeader.biBitCount = 32
+        ppv_bits = ctypes.c_void_p()
+        self._theme_bmp = g.CreateDIBSection(self._theme_dc, ctypes.byref(bmi), 0, ctypes.byref(ppv_bits), None, 0)
+        ctypes.memmove(ppv_bits, bytes(arr), len(arr))
+        self._theme_old_bmp = g.SelectObject(self._theme_dc, self._theme_bmp)
+
+        pt_dst = wintypes.POINT(int(self.theme_cur_x), int(self.theme_cur_y))
+        size = wintypes.SIZE(self.theme_size, self.theme_size)
+        pt_src = wintypes.POINT(0, 0)
+        blend = BLENDFUNCTION(0, 0, 255, 1)
+
+        u.UpdateLayeredWindow(self.theme_hwnd, hdc_screen, ctypes.byref(pt_dst), ctypes.byref(size),
+                             self._theme_dc, ctypes.byref(pt_src), 0, ctypes.byref(blend), 2)
+        u.ReleaseDC(0, hdc_screen)
+
+    def refresh_theme_button(self, force=False):
+        if force or self._system_dark() != self._theme_dark:
+            self.draw_theme_button(force=True)
+
+    def _expand_theme_btn(self):
+        l, t, r, b = bounds(int(self.theme_cur_x), int(self.theme_cur_y), work=True)
+        self.theme_expanded = True
+        self.theme_target_x = r - self.theme_size - self.theme_margin
+        self.theme_last_hover = time.monotonic()
+        u.SetWindowPos(self.theme_hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        self._start_theme_anim()
+
+    def _theme_on_enter(self, e):
+        if not self.theme_expanded:
+            self._expand_theme_btn()
+        else:
+            self.theme_last_hover = time.monotonic()
+
+    def _theme_on_press(self, e):
+        self._theme_press_pt = (e.x_root, e.y_root)
+        self._theme_press_y = self.theme_cur_y
+        self._theme_dragging = False
+        self.theme_last_hover = time.monotonic()
+
+    def _theme_on_motion(self, e):
+        if not self._theme_press_pt:
+            return
+        dy = e.y_root - self._theme_press_pt[1]
+        if abs(dy) > 5 or self._theme_dragging:
+            self._theme_dragging = True
+            l, t, r, b = bounds(int(self.theme_cur_x), int(self.theme_cur_y), work=True)
+            new_y = max(t + 8, min(b - self.theme_size - 8, self._theme_press_y + dy))
+            self.theme_cur_y = new_y
+            self.theme_last_hover = time.monotonic()
+            u.SetWindowPos(self.theme_hwnd, -1, int(self.theme_cur_x), int(self.theme_cur_y),
+                           self.theme_size, self.theme_size, 0x0001 | 0x0010)
+
+    def _theme_on_release(self, e):
+        if self._theme_dragging:
+            self._theme_dragging = False
+            self.theme_pos[1] = int(self.theme_cur_y)
+            self.save()
+        elif self._theme_press_pt:
+            dx = abs(e.x_root - self._theme_press_pt[0])
+            dy = abs(e.y_root - self._theme_press_pt[1])
+            if dx <= 6 and dy <= 6:
+                self.app.toggle_theme()
+                self.refresh_theme_button(force=True)
+        self._theme_press_pt = None
+        self.theme_last_hover = time.monotonic()
+
+    def _start_theme_anim(self):
+        if not self.theme_animating:
+            self.theme_animating = True
+            self._theme_anim_step()
+
+    def _theme_anim_step(self):
+        if not self.theme_btn.winfo_viewable():
+            self.theme_animating = False
+            return
+        diff = self.theme_target_x - self.theme_cur_x
+        if abs(diff) > 0.5:
+            self.theme_cur_x += diff * 0.35
+            u.SetWindowPos(self.theme_hwnd, -1, int(self.theme_cur_x), int(self.theme_cur_y),
+                           self.theme_size, self.theme_size, 0x0001 | 0x0010)
+            self.root.after(16, self._theme_anim_step)
+        else:
+            self.theme_cur_x = self.theme_target_x
+            u.SetWindowPos(self.theme_hwnd, -1, int(self.theme_cur_x), int(self.theme_cur_y),
+                           self.theme_size, self.theme_size, 0x0001 | 0x0010)
+            self.theme_animating = False
+
     def place_theme_button(self):
-        l,t,r,b=bounds(*self.theme_pos,work=True)
-        w=self.theme_btn.winfo_reqwidth();h=self.theme_btn.winfo_reqheight()
-        x=max(l,min(self.theme_pos[0],r-w));y=max(t,min(self.theme_pos[1],b-h))
-        self.theme_btn.geometry(f'+{x}+{y}')
-        return x,y
-    def theme_drag_start(self,e):
-        self._theme_press=(e.x_root,e.y_root)
-        self._theme_drag=(e.x_root-self.theme_btn.winfo_x(),e.y_root-self.theme_btn.winfo_y())
-    def theme_drag(self,e):
-        if not self._theme_drag:return
-        l,t,r,b=bounds(e.x_root,e.y_root,work=True)
-        w=self.theme_btn.winfo_reqwidth();h=self.theme_btn.winfo_reqheight()
-        x=max(l,min(e.x_root-self._theme_drag[0],r-w));y=max(t,min(e.y_root-self._theme_drag[1],b-h))
-        self.theme_btn.geometry(f'+{x}+{y}')
-        self.theme_pos=[x,y]
-    def theme_drag_end(self,e):
-        if self._theme_press and abs(e.x_root-self._theme_press[0])+abs(e.y_root-self._theme_press[1])<=6:
-            self.app.toggle_theme()
-            self.refresh_theme_button()
-        self._theme_press=self._theme_drag=None
-        self.save()
+        l, t, r, b = bounds(int(self.theme_cur_x), int(self.theme_cur_y), work=True)
+        self.theme_cur_y = max(t + 8, min(self.theme_pos[1], b - self.theme_size - 8))
+        self.theme_pos[1] = int(self.theme_cur_y)
+        x_hidden = r - self.theme_peek
+        x_shown = r - self.theme_size - self.theme_margin
+        if self.theme_expanded:
+            self.theme_target_x = x_shown
+            self.theme_cur_x = x_shown
+        else:
+            self.theme_target_x = x_hidden
+            self.theme_cur_x = x_hidden
+        u.SetWindowPos(self.theme_hwnd, -1, int(self.theme_cur_x), int(self.theme_cur_y),
+                       self.theme_size, self.theme_size, 0x0001 | 0x0010 | 0x0040)
+        return int(self.theme_cur_x), int(self.theme_cur_y)
+
+    def _theme_tick(self, now, p, blocked):
+        if not self.theme_btn.winfo_viewable() or blocked:
+            return False
+        l, t, r, b = bounds(int(self.theme_cur_x), int(self.theme_cur_y), work=True)
+        x_hidden = r - self.theme_peek
+        in_y_zone = (self.theme_cur_y - 16 <= p.y <= self.theme_cur_y + self.theme_size + 16)
+
+        if not self.theme_expanded:
+            if p.x >= r - self.theme_peek - 8 and in_y_zone:
+                self._expand_theme_btn()
+        else:
+            hover = (self.theme_cur_x - 14 <= p.x <= r + 4 and in_y_zone)
+            if hover:
+                self.theme_last_hover = now
+            elif not self._theme_dragging and (now - self.theme_last_hover > 0.35):
+                self.theme_expanded = False
+                self.theme_target_x = x_hidden
+                self._start_theme_anim()
+
+        # 只要按钮展开或鼠标在按钮的纵向热区里，就告诉主循环别弹右侧启动栏
+        return self.theme_expanded or (p.x >= r - 12 and in_y_zone)
+
     def tick(self):
         now=time.monotonic(); p=wintypes.POINT(); u.GetCursorPos(ctypes.byref(p))
         self.update_weather(now)
@@ -471,25 +723,27 @@ class Widgets:
                 if not isinstance(pos,list) or len(pos)!=2 or not all(isinstance(v,int) for v in pos):pos=[40,70]
                 l,t,r,b=bounds(*pos,work=True);x=max(l,min(pos[0],r-self.clock.winfo_reqwidth()));y=max(t,min(pos[1],b-self.clock.winfo_reqheight()))
                 self.clock.geometry(f'{x:+d}{y:+d}')
-                # SW_SHOWNOACTIVATE plus SWP_NOACTIVATE restores above the wallpaper
-                # without making this widget the foreground application.
-                # Use HWND_BOTTOM (1) so the desktop clock stays below all application windows.
                 u.ShowWindow(self.clock_hwnd,4)
                 u.SetWindowPos(self.clock_hwnd,1,x,y,0,0,0x0011)
         elif visible:self.clock.withdraw()
+
+        theme_edge = False
         if (self.theme_btn_always.get() or self.app.desktop_icons_visible() is False) and not blocked:
             if not self.theme_btn.winfo_viewable():
-                x,y=self.place_theme_button()
-                u.ShowWindow(self.theme_hwnd,4)
-                u.SetWindowPos(self.theme_hwnd,1,x,y,0,0,0x0011)
+                self.place_theme_button()
+                u.ShowWindow(self.theme_hwnd, 4)
+                u.SetWindowPos(self.theme_hwnd, -1, int(self.theme_cur_x), int(self.theme_cur_y),
+                               self.theme_size, self.theme_size, 0x0010 | 0x0040)
+            theme_edge = self._theme_tick(now, p, blocked)
         elif self.theme_btn.winfo_viewable():
             self.theme_btn.withdraw()
+
         if visible and now-self.last_position_check>1:
             self.place_clock(self.clock.winfo_x(),self.clock.winfo_y())
             self.last_position_check=now
         l,t,r,b=bounds(p.x,p.y)
         monitor_edge = self.monitor.tick(now, p.x, p.y, (l,t,r,b), blocked, self.bar_on.get())
-        edge=self.bar_on.get() and p.x>=r-3 and not blocked and not monitor_edge
+        edge=self.bar_on.get() and p.x>=r-3 and not blocked and not monitor_edge and not theme_edge
         monitor=(l,t,r,b)
         if not edge:
             self.edge_since=None
