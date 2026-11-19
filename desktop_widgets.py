@@ -95,6 +95,7 @@ class Widgets:
         self.clock_label.bind('<ButtonPress-1>',self.drag_start)
         self.clock_label.bind('<B1-Motion>',self.drag)
         self.clock_label.bind('<ButtonRelease-1>',lambda e:self.finish_drag())
+        self.clock_label.bind('<Double-Button-1>',lambda e:self.app.toggle_theme())
         self.clock_label.bind('<Button-3>',lambda e:self.settings())
         self.clock_label.bind('<MouseWheel>',self.wheel)
         self.clock_label.bind('<Button-2>',lambda e:self.adjust('seconds',not self.style['seconds']))
@@ -107,6 +108,28 @@ class Widgets:
         self.settings_window=None
         self.preview=None
         self.draw_clock()
+        # ☀/☾ 一键切换深浅主题的桌面小按钮（拖动可移位，右键打开设置）
+        tb=self.cfg.get('theme_btn',{})
+        self.theme_btn_always=tk.BooleanVar(value=tb.get('always',True) if isinstance(tb,dict) else True)
+        pos=tb.get('position') if isinstance(tb,dict) else None
+        if not (isinstance(pos,list) and len(pos)==2 and all(type(v) is int for v in pos)):
+            pos=[max(0,self.root.winfo_screenwidth()-72),12]
+        self.theme_pos=pos
+        self._theme_press=self._theme_drag=None
+        self._theme_dark=None
+        self.theme_btn=tk.Toplevel(self.root); self.theme_btn.withdraw(); self.theme_btn.overrideredirect(True)
+        self.theme_btn.configure(bg='#010203'); self.theme_btn.wm_attributes('-transparentcolor','#010203')
+        self.theme_canvas=tk.Canvas(self.theme_btn,bg='#010203',highlightthickness=0,cursor='hand2')
+        self.theme_canvas.pack()
+        self.theme_canvas.bind('<ButtonPress-1>',self.theme_drag_start)
+        self.theme_canvas.bind('<B1-Motion>',self.theme_drag)
+        self.theme_canvas.bind('<ButtonRelease-1>',self.theme_drag_end)
+        self.theme_canvas.bind('<Button-3>',lambda e:self.settings())
+        self.theme_btn.update_idletasks()
+        self.theme_hwnd=u.GetAncestor(self.theme_btn.winfo_id(),2)
+        exstyle=u.GetWindowLongPtrW(self.theme_hwnd,-20)
+        u.SetWindowLongPtrW(self.theme_hwnd,-20,exstyle|0x08000000|0x80)
+        self.draw_theme_button()
         self.bar = tk.Toplevel(self.root); self.bar.withdraw(); self.bar.overrideredirect(True)
         self.bar.configure(bg='#18202D'); self.bar.attributes('-topmost',True)
         self.expanded = set(); self.busy=False; self.last_inside=time.monotonic(); self.last_theme=0; self.last_clock=''
@@ -122,7 +145,7 @@ class Widgets:
         self.cfg['weather_enabled']=self.weather_on.get()
         if self.weather:
             self.cfg['weather_cache']={k:self.weather[k] for k in ('line','updated','place','source','station') if k in self.weather}
-        self.cfg.update(groups=self.groups,clock=self.clock_on.get(),bar=self.bar_on.get(),appearance=self.style,adaptive=self.adaptive.get(),recent=self.recent,wallpaper_palettes=self.palettes)
+        self.cfg.update(groups=self.groups,clock=self.clock_on.get(),bar=self.bar_on.get(),appearance=self.style,adaptive=self.adaptive.get(),recent=self.recent,wallpaper_palettes=self.palettes,theme_btn={'always':self.theme_btn_always.get(),'position':self.theme_pos})
         save_config(self.app.cfg)
 
     def wheel(self,event):
@@ -291,7 +314,8 @@ class Widgets:
         ttk.Checkbutton(switches,text='当地天气',variable=self.weather_on,command=self.toggle_weather).pack(side='left')
         ttk.Checkbutton(switches,text='图标隐藏时显示时钟',variable=self.clock_on,command=self.save).pack(side='left')
         ttk.Checkbutton(switches,text='启用右侧启动栏',variable=self.bar_on,command=self.save).pack(side='left')
-        ttk.Label(pane,text='图标隐藏时才显示时钟 · 可直接拖动，右键设置（预览可滚动）').pack(anchor='w',pady=(10,4))
+        ttk.Checkbutton(switches,text='主题按钮常显',variable=self.theme_btn_always,command=self.save).pack(side='left')
+        ttk.Label(pane,text='图标隐藏时才显示时钟 · 可直接拖动 · 双击时钟或点 ☀/☾ 按钮一键切换深浅主题（右键设置）').pack(anchor='w',pady=(10,4))
         frame=ttk.Frame(pane);frame.pack(fill='both',expand=True)
         viewport=tk.Canvas(frame,bg='#334155',highlightthickness=0);viewport.grid(row=0,column=0,sticky='nsew')
         sx=ttk.Scrollbar(frame,orient='horizontal',command=viewport.xview);sx.grid(row=1,column=0,sticky='ew')
@@ -352,6 +376,7 @@ class Widgets:
                 self.button('  ＋ 添加软件 / 文件',lambda n=name:self.add(n,False))
                 self.button('  ＋ 添加文件夹',lambda n=name:self.add(n,True))
         self.button('暂停 / 恢复自动隐藏',self.app.pause_auto)
+        self.button(('☀' if self._system_dark() else '☾')+' 一键切换深浅主题',self.app.toggle_theme)
         self.button('桌面组件设置',self.settings)
         self.bar.update_idletasks()
     def fold(self,name):
@@ -384,6 +409,45 @@ class Widgets:
                 self.accent='#'+''.join(f'{max(120,c):02x}' for c in rgb)
                 self.draw_clock(); self.render_bar()
         except OSError:pass
+        self.refresh_theme_button()
+    def _system_dark(self):
+        try:
+            from theme_switch import is_dark
+            return bool(is_dark())
+        except Exception:
+            return False
+    def draw_theme_button(self):
+        dark=self._system_dark()
+        self._theme_dark=dark
+        c=self.theme_canvas
+        c.configure(width=48,height=48)
+        c.delete('all')
+        c.create_oval(4,4,44,44,fill='#1E293B' if dark else '#FFF7E0',outline='#334155' if dark else '#F59E0B',width=2)
+        c.create_text(24,24,text='☾' if dark else '☀',font=('Segoe UI Symbol',20),fill='#E2E8F0' if dark else '#D97706')
+    def refresh_theme_button(self):
+        if self._system_dark()!=self._theme_dark:self.draw_theme_button()
+    def place_theme_button(self):
+        l,t,r,b=bounds(*self.theme_pos,work=True)
+        w=self.theme_btn.winfo_reqwidth();h=self.theme_btn.winfo_reqheight()
+        x=max(l,min(self.theme_pos[0],r-w));y=max(t,min(self.theme_pos[1],b-h))
+        self.theme_btn.geometry(f'+{x}+{y}')
+        return x,y
+    def theme_drag_start(self,e):
+        self._theme_press=(e.x_root,e.y_root)
+        self._theme_drag=(e.x_root-self.theme_btn.winfo_x(),e.y_root-self.theme_btn.winfo_y())
+    def theme_drag(self,e):
+        if not self._theme_drag:return
+        l,t,r,b=bounds(e.x_root,e.y_root,work=True)
+        w=self.theme_btn.winfo_reqwidth();h=self.theme_btn.winfo_reqheight()
+        x=max(l,min(e.x_root-self._theme_drag[0],r-w));y=max(t,min(e.y_root-self._theme_drag[1],b-h))
+        self.theme_btn.geometry(f'+{x}+{y}')
+        self.theme_pos=[x,y]
+    def theme_drag_end(self,e):
+        if self._theme_press and abs(e.x_root-self._theme_press[0])+abs(e.y_root-self._theme_press[1])<=6:
+            self.app.toggle_theme()
+            self.refresh_theme_button()
+        self._theme_press=self._theme_drag=None
+        self.save()
     def tick(self):
         now=time.monotonic(); p=wintypes.POINT(); u.GetCursorPos(ctypes.byref(p))
         self.update_weather(now)
@@ -413,6 +477,13 @@ class Widgets:
                 u.ShowWindow(self.clock_hwnd,4)
                 u.SetWindowPos(self.clock_hwnd,1,x,y,0,0,0x0011)
         elif visible:self.clock.withdraw()
+        if (self.theme_btn_always.get() or self.app.desktop_icons_visible() is False) and not blocked:
+            if not self.theme_btn.winfo_viewable():
+                x,y=self.place_theme_button()
+                u.ShowWindow(self.theme_hwnd,4)
+                u.SetWindowPos(self.theme_hwnd,1,x,y,0,0,0x0011)
+        elif self.theme_btn.winfo_viewable():
+            self.theme_btn.withdraw()
         if visible and now-self.last_position_check>1:
             self.place_clock(self.clock.winfo_x(),self.clock.winfo_y())
             self.last_position_check=now

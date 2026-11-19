@@ -18,6 +18,7 @@ TPM_RIGHTBUTTON = 0x0002
 MF_STRING = 0x0000
 IDM_OPEN = 2001
 IDM_QUIT = 2002
+IDM_THEME = 2003
 TRAY_ICON_ID = 1
 
 # ---------------------------------------------------------------- 系统托盘
@@ -66,6 +67,7 @@ class TrayIcon:
         self._old_proc = None
         self._proc_ref = None      # 保持回调引用，防止被垃圾回收导致崩溃
         self._icon = None
+        self.on_theme = None
         self._u = ctypes.windll.user32
         self._g = ctypes.windll.gdi32
         self._s = ctypes.windll.shell32
@@ -187,6 +189,13 @@ class TrayIcon:
         u.GetCursorPos(ctypes.byref(pt))
         menu = u.CreatePopupMenu()
         u.AppendMenuW(menu, MF_STRING, IDM_OPEN, "打开设置")
+        if self.on_theme:
+            try:
+                from theme_switch import is_dark
+                label = "☀ 切换为浅色主题" if is_dark() else "☾ 切换为深色主题"
+            except ImportError:
+                label = "切换深浅主题"
+            u.AppendMenuW(menu, MF_STRING, IDM_THEME, label)
         u.AppendMenuW(menu, MF_STRING, IDM_QUIT, "退出程序")
         u.SetForegroundWindow(self.hwnd)   # 托盘菜单必需，否则可能不消失
         u.TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y,
@@ -212,6 +221,9 @@ class TrayIcon:
             cmd = wparam & 0xFFFF
             if cmd == IDM_OPEN:
                 self._on_open()
+                return 0
+            if cmd == IDM_THEME and self.on_theme:
+                self.on_theme()
                 return 0
             if cmd == IDM_QUIT:
                 self._on_quit()

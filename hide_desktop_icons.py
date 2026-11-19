@@ -37,6 +37,7 @@ SW_SHOW = 5
 VK_CONTROL = 0x11
 VK_MENU = 0x12      # Alt
 VK_H = 0x48
+VK_T = 0x54
 
 # 单实例与“双击快捷方式唤起主窗口”的跨进程内核对象
 MUTEX_NAME = "Local\\JingZhuoMian_SingleInstance"
@@ -57,6 +58,18 @@ RED_D = "#B91C1C"
 TEXT = "#1E293B"
 SUBTEXT = "#64748B"
 WHITE = "#FFFFFF"
+
+# 主窗口深色配色（跟随系统主题一键切换）
+DARK_BG = "#0F172A"
+DARK_TEXT = "#E2E8F0"
+DARK_SUBTEXT = "#94A3B8"
+DARK_PANEL = "#1E293B"
+DARK_PANEL_HI = "#334155"
+DARK_SELECT = "#1E293B"
+_BUTTON_BG = {"#e2e8f0": DARK_PANEL, "#cbd5e1": DARK_PANEL,
+              "#1e293b": "#E2E8F0", "#334155": "#CBD5E1"}
+_BUTTON_ACT = {"#e2e8f0": DARK_PANEL_HI, "#cbd5e1": DARK_PANEL_HI,
+               "#1e293b": "#CBD5E1", "#334155": "#CBD5E1"}
 
 # ---------------------------------------------------------------- 界面
 class App:
@@ -139,7 +152,7 @@ class App:
                            command=self._persist
                            ).pack(side="left")
 
-        tk.Label(root, text="快捷键 Ctrl + Alt + H 立即切换",
+        tk.Label(root, text="Ctrl+Alt+H 切换图标 · Ctrl+Alt+T 切换主题",
                  font=f_small, bg=BG, fg=SUBTEXT).pack(pady=(10, 2))
 
         actions = tk.Frame(root, bg=BG)
@@ -157,11 +170,21 @@ class App:
         self.pause_button = action("暂停自动隐藏", self.pause_auto, 0, 1)
         action("隐藏窗口", self.hide_window, 1, 0)
         action("退出程序", self.quit_app, 1, 1, danger=True)
+        self.theme_button = tk.Button(actions, text="切换深浅主题", command=self.toggle_theme, font=f_normal,
+                                       bg="#E2E8F0", fg=TEXT, activebackground="#CBD5E1",
+                                       relief="flat", borderwidth=0, cursor="hand2", pady=7)
+        self.theme_button.grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
+        try:
+            from theme_switch import is_dark
+            self.theme_button.config(text="☀ 切换为浅色主题" if is_dark() else "☾ 切换为深色主题")
+        except ImportError:
+            pass
         self._paused = False
 
         # 运行状态
         self._in_zone = False
         self._hk_held = False
+        self._theme_held = False
         _x0, _y0 = get_cursor()
         self._last_x, self._last_y = _x0, _y0
         self._last_activity = time.monotonic()
@@ -185,6 +208,7 @@ class App:
                              self._tray_open,
                              lambda: root.after_idle(self.quit_app))
         self.tray.on_resume=lambda:self.root.after_idle(self.resume_desktop)
+        self.tray.on_theme=lambda:self.root.after_idle(self.toggle_theme)
         self.tray.install()
         ctypes.windll.wtsapi32.WTSRegisterSessionNotification(wintypes.HWND(top_hwnd),0)
 
@@ -197,6 +221,11 @@ class App:
 
         self._persist()
         self.refresh_ui()
+        try:
+            from theme_switch import is_dark
+            self._restyle(is_dark())
+        except ImportError:
+            pass
         self.root.after(150, self.poll)
         self.root.after(10, self.poll_mouse)
 
@@ -263,6 +292,52 @@ class App:
         self._paused = not self._paused
         self.pause_button.config(text="恢复自动隐藏" if self._paused else "暂停自动隐藏")
         self._last_activity = time.monotonic()
+
+    def toggle_theme(self):
+        """一键切换 Windows 深色/浅色主题，应用和浏览器同时生效。"""
+        try:
+            import theme_switch
+            dark = theme_switch.toggle()
+            self._restyle(dark)
+            self.theme_button.config(text="☀ 切换为浅色主题" if dark else "☾ 切换为深色主题")
+            self.widgets.theme()               # 刷新时钟配色
+            self.widgets.refresh_theme_button()
+        except Exception:
+            pass
+
+    def _restyle(self, dark):
+        """让主窗口配色跟随系统深/浅色主题（ttk 设置窗口会自动跟随）。"""
+        bg = DARK_BG if dark else BG
+        text = DARK_TEXT if dark else TEXT
+        sub = DARK_SUBTEXT if dark else SUBTEXT
+        select = DARK_SELECT if dark else WHITE
+
+        def walk(w):
+            cls = w.winfo_class()
+            if cls == "Toplevel":
+                return  # 挂件窗口各自管理配色，不递归
+            try:
+                if cls == "Label":
+                    fg = sub if str(w.cget("fg")).lower() in ("#64748b", "#94a3b8") else text
+                    w.configure(bg=bg, fg=fg)
+                elif cls == "Frame":
+                    w.configure(bg=bg)
+                elif cls == "Canvas":
+                    w.configure(bg=bg)
+                elif cls in ("Checkbutton", "Radiobutton"):
+                    w.configure(bg=bg, activebackground=bg, fg=text, selectcolor=select)
+                elif cls == "Button":
+                    current = str(w.cget("bg")).lower()
+                    if current in _BUTTON_BG:
+                        w.configure(bg=_BUTTON_BG[current], activebackground=_BUTTON_ACT[current],
+                                    fg=text)
+                for child in w.winfo_children():
+                    walk(child)
+            except tk.TclError:
+                pass
+
+        self.root.configure(bg=bg)
+        walk(self.root)
 
     def desktop_icons_visible(self):
         return icons_visible()
@@ -347,6 +422,13 @@ class App:
             self.manual_toggle()
         elif not down:
             self._hk_held = False
+        t = user32.GetAsyncKeyState(VK_T) & 0x8000
+        theme_down = bool(ctrl and alt and t)
+        if theme_down and not self._theme_held:
+            self._theme_held = True
+            self.toggle_theme()
+        elif not theme_down:
+            self._theme_held = False
 
     # ------------------------------------------------------------ 主轮询
     def poll(self):
