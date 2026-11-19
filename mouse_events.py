@@ -3,6 +3,7 @@ import ctypes
 from ctypes import wintypes
 import queue
 import threading
+import time
 
 class MouseEvents:
     def __init__(self):
@@ -20,7 +21,7 @@ class MouseEvents:
         def callback(code,msg,data):
             if code>=0 and msg in (0x201,0x202):
                 p=ctypes.cast(data,ctypes.POINTER(Data)).contents.pt
-                self.events.put((msg,p.x,p.y))
+                self.events.put((time.monotonic(),msg,p.x,p.y))
             return u.CallNextHookEx(None,code,msg,data)
         self.callback=cbtype(callback)
         self.thread_id=k.GetCurrentThreadId()

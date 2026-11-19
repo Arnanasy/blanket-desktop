@@ -68,6 +68,7 @@ class Widgets:
         self.worker = ThreadPoolExecutor(max_workers=1)
         self.sampling = None
         self.sample_again = False
+        self.offset = None
         self.save_timer = None
         self.hint_timer = None
         self.control_vars = {}
@@ -113,7 +114,8 @@ class Widgets:
         if not (isinstance(pos, list) and len(pos) == 2 and all(type(v) is int for v in pos)):
             pos = [max(0, self.root.winfo_screenwidth() - 54), 100]
         self.theme_pos = pos
-        self.theme_size = 48
+        self.ui_scale=max(1,self.root.winfo_fpixels("1i")/96)
+        self.theme_size = round(48*self.ui_scale)
         self.theme_peek = 6       # 平时贴边半隐藏露出的细边宽度
         self.theme_margin = 6     # 展开时距离屏幕右边缘的距离
         self.theme_cur_x = float(pos[0])
@@ -138,6 +140,10 @@ class Widgets:
         key_color = '#010203'
         self.theme_btn.configure(cursor='hand2', bg=key_color)
         self.theme_btn.attributes('-transparentcolor', key_color, '-topmost', True)
+        from fractions import Fraction
+        ratio=Fraction(self.theme_size,48).limit_denominator(8)
+        if ratio.numerator!=ratio.denominator:
+            self.theme_images={k:im.zoom(ratio.numerator).subsample(ratio.denominator) for k,im in self.theme_images.items()}
         self.theme_label = tk.Label(self.theme_btn, bg=key_color, borderwidth=0, highlightthickness=0)
         self.theme_label.pack(fill='both', expand=True)
         self.theme_btn.bind('<Enter>', self._theme_on_enter)
@@ -288,7 +294,7 @@ class Widgets:
     def settings(self):
         if self.settings_window and self.settings_window.winfo_exists():
             self.settings_window.lift();return
-        w=tk.Toplevel(self.root);self.settings_window=w;w.title('时钟与桌面外观');w.geometry('610x700')
+        w=tk.Toplevel(self.root);self.settings_window=w;w.title('时钟与桌面外观');w.geometry(f'{round(610*self.ui_scale)}x{min(round(700*self.ui_scale),w.winfo_screenheight()-60)}')
         w.minsize(520,550)
         toolbar = ttk.Frame(w)
         toolbar.pack(fill='x', padx=16, pady=(8,0))
@@ -302,7 +308,8 @@ class Widgets:
             for key,var in variables.items():self.style[key]=var.get()
             self.draw_clock()
             if self.preview and self.preview.winfo_exists():self.draw_clock(self.preview)
-            self.save()
+            if self.save_timer:self.root.after_cancel(self.save_timer)
+            self.save_timer=self.root.after(400,self.save)
         def row(label):
             f=ttk.Frame(box);f.pack(fill='x',pady=3);ttk.Label(f,text=label,width=12).pack(side='left');return f
         for key,label,lo,hi in [('size','时间字号',16,160),('date_size','日期字号',10,60),('padding','留白大小',5,60),('opacity','不透明度',30,100)]:
@@ -365,8 +372,10 @@ class Widgets:
 
     def drag_start(self,e): self.offset=(e.x_root-self.clock.winfo_x(),e.y_root-self.clock.winfo_y())
     def drag(self,e):
+        if self.offset is None:return
         self.place_clock(e.x_root-self.offset[0],e.y_root-self.offset[1])
     def finish_drag(self):
+        self.offset=None
         self.place_clock(self.clock.winfo_x(),self.clock.winfo_y(),True)
         u.SetWindowPos(self.clock_hwnd,1,0,0,0,0,0x0013)
         self.save();self.sample_wallpaper()
@@ -380,7 +389,9 @@ class Widgets:
         return rect.left<=l and rect.top<=t and rect.right>=r and rect.bottom>=b
 
     def button(self,text,command):
-        tk.Button(self.bar,text=text,command=command,bg='#18202D',fg=self.accent,activebackground='#28364A',activeforeground='white',relief='flat',anchor='w',padx=16,pady=7).pack(fill='x')
+        b=tk.Button(self.bar,text=text,command=command,bg='#18202D',fg=self.accent,activebackground='#28364A',activeforeground='white',relief='flat',anchor='w',padx=16,pady=7)
+        b.pack(fill='x')
+        return b
     def render_bar(self):
         for w in self.bar.winfo_children(): w.destroy()
         self.button('净桌面 · 快捷分组',self.app._tray_open)
@@ -397,7 +408,7 @@ class Widgets:
                 self.button('  ＋ 添加软件 / 文件',lambda n=name:self.add(n,False))
                 self.button('  ＋ 添加文件夹',lambda n=name:self.add(n,True))
         self.button('暂停 / 恢复自动隐藏',self.app.pause_auto)
-        self.button(('☀' if self._system_dark() else '☾')+' 一键切换深浅主题',self.app.toggle_theme)
+        self.bar_theme_button=self.button(('☀' if self._system_dark() else '☾')+' 一键切换深浅主题',self.app.toggle_theme)
         self.button('桌面组件设置',self.settings)
         self.bar.update_idletasks()
     def fold(self,name):
@@ -409,7 +420,7 @@ class Widgets:
         try:
             path=filedialog.askdirectory(parent=self.bar) if folder else filedialog.askopenfilename(parent=self.bar)
             if path and path not in self.groups[name]: self.groups[name].append(path); self.save(); self.render_bar()
-        finally:self.busy=False; self.last_inside=time.monotonic()
+        finally:self.app.discard_mouse();self.busy=False; self.last_inside=time.monotonic()
     def remove(self,name,path):
         self.groups[name].remove(path); self.save(); self.render_bar()
     def open(self,path):
@@ -426,8 +437,13 @@ class Widgets:
         try:
             if ctypes.windll.dwmapi.DwmGetColorizationColor(ctypes.byref(color),ctypes.byref(opaque))==0:
                 rgb=[(color.value >> shift)&255 for shift in (16,8,0)]
-                self.accent='#'+''.join(f'{max(120,c):02x}' for c in rgb)
-                self.draw_clock(); self.render_bar()
+                accent='#'+''.join(f'{max(120,c):02x}' for c in rgb)
+                if accent!=self.accent:
+                    self.accent=accent
+                    self.draw_clock()
+                    for button in self.bar.winfo_children():
+                        if isinstance(button,tk.Button) and button.cget('bg')=='#18202D':
+                            button.configure(fg=accent)
         except OSError:pass
         self.refresh_theme_button()
     def _system_dark(self):
@@ -442,6 +458,8 @@ class Widgets:
         if force or self._theme_dark != dark:
             self.theme_label.configure(image=self.theme_images[dark])
             self._theme_dark = dark
+            if hasattr(self,"bar_theme_button"):
+                self.bar_theme_button.configure(text=("☀" if dark else "☾")+" 一键切换深浅主题")
 
     def refresh_theme_button(self, force=False):
         if force or self._system_dark() != self._theme_dark:
@@ -538,10 +556,7 @@ class Widgets:
         x_hidden = r - self.theme_peek
         in_y_zone = (self.theme_cur_y - 16 <= p.y <= self.theme_cur_y + self.theme_size + 16)
 
-        if not self.theme_expanded:
-            if r - self.theme_peek - 8 <= p.x < r and in_y_zone:
-                self._expand_theme_btn()
-        else:
+        if self.theme_expanded:
             hover = (self.theme_cur_x - 14 <= p.x <= r + 4 and in_y_zone)
             if hover:
                 self.theme_last_hover = now
@@ -604,7 +619,8 @@ class Widgets:
             self.edge_since=now;self.edge_monitor=monitor
         if edge and self.edge_since is not None and now-self.edge_since>=0.35:
             wl,wt,wr,wb=bounds(p.x,p.y,work=True)
-            self.bar.geometry(f'260x{min(self.bar.winfo_reqheight(),wb-wt)}+{wr-260}+{wt+max(0,(wb-wt-min(self.bar.winfo_reqheight(),wb-wt))//2)}')
+            bar_width=max(self.bar.winfo_reqwidth(),round(260*self.ui_scale))
+            self.bar.geometry(f'{bar_width}x{min(self.bar.winfo_reqheight(),wb-wt)}+{wr-bar_width}+{wt+max(0,(wb-wt-min(self.bar.winfo_reqheight(),wb-wt))//2)}')
             self.bar.deiconify();self.last_inside=now
         if self.bar.winfo_viewable():
             inside=self.bar.winfo_x()<=p.x<self.bar.winfo_x()+self.bar.winfo_width() and self.bar.winfo_y()<=p.y<self.bar.winfo_y()+self.bar.winfo_height()

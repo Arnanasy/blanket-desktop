@@ -67,6 +67,8 @@ class TrayIcon:
         self._old_proc = None
         self._proc_ref = None      # 保持回调引用，防止被垃圾回收导致崩溃
         self._icon = None
+        self.on_resume = lambda: None
+        self.menu_closed = lambda: None
         self.on_theme = None
         self._u = ctypes.windll.user32
         self._g = ctypes.windll.gdi32
@@ -129,7 +131,7 @@ class TrayIcon:
         size = 32
         screen_dc = u.GetDC(None)
         color_bmp = g.CreateCompatibleBitmap(screen_dc, size, size)
-        mask_bmp = g.CreateBitmap(size, size, 1, 1, None)
+        mask_bmp = g.CreateBitmap(size, size, 1, 1, ctypes.create_string_buffer(((size+15)//16)*2*size))
         mem_dc = g.CreateCompatibleDC(screen_dc)
         old_obj = g.SelectObject(mem_dc, color_bmp)
 
@@ -201,6 +203,7 @@ class TrayIcon:
         u.TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y,
                          0, self.hwnd, None)
         u.DestroyMenu(menu)
+        self.menu_closed()
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         if (msg==0x02B1 and wparam==8) or (msg==0x0218 and wparam in (7,18)) or msg==0x007E:

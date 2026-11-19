@@ -10,38 +10,39 @@ class Memory(c.Structure):
     _fields_ = [('length', DWORD), ('load', DWORD), ('sizes', c.c_uint64 * 7)]
 
 class Interface(c.Structure):
-    _fields_ = [('name', w.WCHAR * 256), ('index', DWORD), ('kind', DWORD),
-                ('mtu', DWORD), ('speed', DWORD), ('address_len', DWORD),
-                ('address', c.c_ubyte * 8), ('admin', DWORD), ('status', DWORD),
-                ('changed', DWORD), ('received', DWORD), ('in_stats', DWORD * 5),
-                ('sent', DWORD), ('out_stats', DWORD * 5), ('description_len', DWORD),
-                ('description', c.c_ubyte * 256)]
+    # MIB_IF_ROW2 (netioapi.h). HardwareInterface is bit 0 of flags.
+    _fields_ = [('luid', c.c_uint64), ('index', DWORD), ('guid', c.c_byte*16),
+                ('alias', w.WCHAR*257), ('description', w.WCHAR*257),
+                ('address_len', DWORD), ('address', c.c_byte*32), ('permanent', c.c_byte*32),
+                ('mtu', DWORD), ('kind', DWORD), ('tunnel', DWORD), ('media', DWORD),
+                ('physical_medium', DWORD), ('access', DWORD), ('direction', DWORD),
+                ('flags', c.c_ubyte), ('oper', DWORD), ('admin', DWORD), ('connected', DWORD),
+                ('network_guid', c.c_byte*16), ('connection', DWORD),
+                ('tx_speed', c.c_uint64), ('rx_speed', c.c_uint64),
+                ('received', c.c_uint64), ('in_stats', c.c_uint64*8),
+                ('sent', c.c_uint64), ('out_stats', c.c_uint64*8)]
+
+class InterfaceTable(c.Structure):
+    _fields_ = [('count', DWORD), ('first', Interface)]
 
 kernel = c.windll.kernel32
 kernel.GetSystemTimes.argtypes = [c.POINTER(w.FILETIME)] * 3
 kernel.GlobalMemoryStatusEx.argtypes = [c.POINTER(Memory)]
-get_table = c.windll.iphlpapi.GetIfTable
-get_table.argtypes = [c.c_void_p, c.POINTER(DWORD), w.BOOL]
-get_table.restype = DWORD
+ip = c.windll.iphlpapi
+ip.GetIfTable2.argtypes = [c.POINTER(c.POINTER(InterfaceTable))]
+ip.FreeMibTable.argtypes = [c.c_void_p]
+ip.FreeMibTable.restype = None
 
 def network():
-    size = DWORD()
-    if get_table(None, c.byref(size), False) != 122:
+    table = c.POINTER(InterfaceTable)()
+    if ip.GetIfTable2(c.byref(table)):
         return None
-    for _ in range(3):
-        buf = c.create_string_buffer(size.value)
-        status = get_table(buf, c.byref(size), False)
-        if status == 122:
-            continue
-        if status:
-            return None
-        count = DWORD.from_buffer(buf).value
-        if 4 + count*c.sizeof(Interface) > len(buf):
-            return None
-        rows = (Interface * count).from_buffer(buf, 4)
-        return {r.index:(r.received,r.sent) for r in rows
-                if r.kind in (6,71,243,244) and r.status == 5}
-    return None
+    try:
+        rows=(Interface*table.contents.count).from_address(c.addressof(table.contents.first))
+        return {row.luid:(row.received,row.sent) for row in rows
+                if row.flags & 1 and row.oper==1 and row.kind in (6,71,243,244)}
+    finally:
+        ip.FreeMibTable(table)
 
 def speed(value):
     if value < 1024: return f'{value:.0f} B/s'
@@ -76,7 +77,7 @@ class Sampler:
             if current and self.net and now>self.last:
                 common = current.keys() & self.net.keys()
                 if common:
-                    rates = [speed(sum((current[i][j]-self.net[i][j]) % 2**32 for i in common)/(now-self.last)) for j in (0,1)]
+                    rates = [speed(sum(max(0,current[i][j]-self.net[i][j]) for i in common)/(now-self.last)) for j in (0,1)]
             lines.extend(('↓    '+rates[0], '↑    '+rates[1]))
             self.net = current
             self.last = now
@@ -252,7 +253,6 @@ class SystemMonitor:
 
     def show(self,x,y,now):
         self.visible=True
-        self.sampler=Sampler()
         self.sample(now)
         self.last_sample=self.last_inside=now
         self.render()
@@ -268,11 +268,12 @@ class SystemMonitor:
 
     def tick(self,now,x,y,monitor,blocked,bar_enabled,suppress_edge=False):
         l,t,r,b=monitor
-        edge=not suppress_edge and (x==l if self.cfg['edge']=='左' else x>=r-3 and (not bar_enabled or y<(t+b)//2))
+        edge=not suppress_edge and (x<l+3 if self.cfg['edge']=='左' else x>=r-3 and (not bar_enabled or y<(t+b)//2))
         if blocked or not edge:
             self.edge_start=None
         elif self.edge_start is None or self.edge_monitor!=monitor:
             self.edge_start=now
+            if not self.visible:self.sample(now)
             self.edge_monitor=monitor
         if not self.visible and not blocked and (self.cfg['pinned'] or self.edge_start is not None and now-self.edge_start>=0.25):
             self.show(x,y,now)

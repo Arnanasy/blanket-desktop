@@ -80,6 +80,9 @@ def domestic_weather(previous):
     return dict(place=city,line=line,station=code,source='中国天气网',updated=now)
 
 def refresh(previous):
+    updated=previous.get("updated",0)
+    if previous.get("line") and isinstance(updated,(int,float)) and 0 <= time.time()-updated < 900:
+        return previous
     try:
         return global_weather(previous)
     except (OSError, ValueError, TypeError, KeyError, IndexError, subprocess.SubprocessError):

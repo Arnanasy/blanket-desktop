@@ -46,5 +46,6 @@ def _notify():
 def toggle():
     """一键切换深色/浅色，返回切换后是否为深色（以实际状态为准）。"""
     dark = not is_dark()
-    set_theme(dark)
+    if not set_theme(dark):
+        raise OSError("Windows 拒绝写入主题设置。")
     return is_dark()

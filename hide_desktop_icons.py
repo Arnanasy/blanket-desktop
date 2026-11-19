@@ -66,12 +66,11 @@ DARK_SUBTEXT = "#94A3B8"
 DARK_PANEL = "#1E293B"
 DARK_PANEL_HI = "#334155"
 DARK_SELECT = "#1E293B"
-_BUTTON_BG = {"#e2e8f0": DARK_PANEL, "#cbd5e1": DARK_PANEL,
-              "#1e293b": "#E2E8F0", "#334155": "#CBD5E1"}
-_BUTTON_ACT = {"#e2e8f0": DARK_PANEL_HI, "#cbd5e1": DARK_PANEL_HI,
-               "#1e293b": "#CBD5E1", "#334155": "#CBD5E1"}
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+kernel32.WaitForSingleObject.restype = wintypes.DWORD
 
-# ---------------------------------------------------------------- 界面
+
 class App:
     def __init__(self, root, show_event=None):
         self.root = root
@@ -158,11 +157,13 @@ class App:
         actions = tk.Frame(root, bg=BG)
         actions.pack(fill="x", padx=24, pady=(6, 12))
         actions.columnconfigure((0, 1), weight=1, uniform="action")
+        self.neutral_buttons = set()
         def action(label, command, row, column, danger=False):
             button = tk.Button(actions, text=label, command=command, font=f_normal,
                                bg=RED if danger else "#E2E8F0", fg=WHITE if danger else TEXT,
                                activebackground=RED_D if danger else "#CBD5E1",
                                relief="flat", borderwidth=0, cursor="hand2", pady=7)
+            if not danger:self.neutral_buttons.add(button)
             button.grid(row=row, column=column, sticky="ew", padx=3, pady=3)
             return button
 
@@ -173,6 +174,7 @@ class App:
         self.theme_button = tk.Button(actions, text="切换深浅主题", command=self.toggle_theme, font=f_normal,
                                        bg="#E2E8F0", fg=TEXT, activebackground="#CBD5E1",
                                        relief="flat", borderwidth=0, cursor="hand2", pady=7)
+        self.neutral_buttons.add(self.theme_button)
         self.theme_button.grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
         try:
             from theme_switch import is_dark
@@ -204,11 +206,13 @@ class App:
                 break
             top_hwnd = parent
         self.tray = TrayIcon(top_hwnd,
-                             self._tray_toggle,
-                             self._tray_open,
+                             lambda: root.after_idle(self._tray_toggle),
+                             lambda: root.after_idle(self._tray_open),
                              lambda: root.after_idle(self.quit_app))
         self.tray.on_resume=lambda:self.root.after_idle(self.resume_desktop)
         self.tray.on_theme=lambda:self.root.after_idle(self.toggle_theme)
+        self.mouse_cutoff = 0
+        self.tray.menu_closed = self.discard_mouse
         self.tray.install()
         ctypes.windll.wtsapi32.WTSRegisterSessionNotification(wintypes.HWND(top_hwnd),0)
 
@@ -235,13 +239,20 @@ class App:
         self.root.after_idle(lambda: messagebox.showinfo(
             "桌面点击", "Windows 暂时无法识别桌面空白。可用托盘图标或 Ctrl + Alt + H 切换。", parent=self.root))
 
+    def discard_mouse(self):
+        self.mouse_cutoff = time.monotonic()
+        self._mouse_down = None
+
     def poll_mouse(self):
         if self.mouse_events.hook:
             for _ in range(100):
                 try:
-                    msg, x, y = self.mouse_events.events.get_nowait()
+                    when, msg, x, y = self.mouse_events.events.get_nowait()
                 except queue.Empty:
                     break
+                if when <= self.mouse_cutoff or time.monotonic()-when > 0.18 or self.widgets.busy:
+                    self._mouse_down=None
+                    continue
                 if msg == 0x201:
                     self._mouse_down = (x, y, self.desktop_click._is_blank_click(x,y))
                 elif self._mouse_down:
@@ -302,11 +313,12 @@ class App:
             self.theme_button.config(text="☀ 切换为浅色主题" if dark else "☾ 切换为深色主题")
             self.widgets.theme()               # 刷新时钟配色
             self.widgets.refresh_theme_button()
-        except Exception:
-            pass
+        except OSError as error:
+            from tkinter import messagebox
+            messagebox.showerror("主题切换失败", str(error), parent=self.root)
 
     def _restyle(self, dark):
-        """让主窗口配色跟随系统深/浅色主题（ttk 设置窗口会自动跟随）。"""
+        """让主窗口配色跟随系统深/浅色主题。"""
         bg = DARK_BG if dark else BG
         text = DARK_TEXT if dark else TEXT
         sub = DARK_SUBTEXT if dark else SUBTEXT
@@ -325,17 +337,36 @@ class App:
                 elif cls == "Canvas":
                     w.configure(bg=bg)
                 elif cls in ("Checkbutton", "Radiobutton"):
-                    w.configure(bg=bg, activebackground=bg, fg=text, selectcolor=select)
+                    w.configure(bg=bg, activebackground=bg, activeforeground=text, fg=text, selectcolor=select)
                 elif cls == "Button":
-                    current = str(w.cget("bg")).lower()
-                    if current in _BUTTON_BG:
-                        w.configure(bg=_BUTTON_BG[current], activebackground=_BUTTON_ACT[current],
-                                    fg=text)
+                    if w in self.neutral_buttons:
+                        w.configure(bg=DARK_PANEL if dark else "#E2E8F0",
+                                    activebackground=DARK_PANEL_HI if dark else "#CBD5E1",
+                                    fg=text, activeforeground=text)
                 for child in w.winfo_children():
                     walk(child)
             except tk.TclError:
                 pass
 
+        from tkinter import ttk
+        style = ttk.Style(self.root)
+        if style.theme_use() != 'clam':
+            style.theme_use('clam')
+        style.configure('.', background=bg, foreground=text, fieldbackground=select,
+                        troughcolor=bg, selectbackground=BLUE, selectforeground=WHITE)
+        for name in ('TButton','TCheckbutton','TRadiobutton','TCombobox'):
+            style.map(name, foreground=[('disabled',sub),('active',text),('!disabled',text)],
+                      background=[('active',select)], fieldbackground=[('readonly',select)])
+        self.root.option_add('*Scale.background',bg)
+        self.root.option_add('*Scale.foreground',text)
+        self.root.option_add('*Scale.troughColor',select)
+        self.root.option_add('*Toplevel.background',bg)
+        def scales(parent):
+            for child in parent.winfo_children():
+                if isinstance(child,tk.Scale):
+                    child.configure(bg=bg,fg=text,troughcolor=select)
+                scales(child)
+        scales(self.root)
         self.root.configure(bg=bg)
         walk(self.root)
 
@@ -436,7 +467,7 @@ class App:
 
         # 用户双击快捷方式（第二个实例）请求打开设置窗口
         if self._show_event is not None:
-            if ctypes.windll.kernel32.WaitForSingleObject(
+            if kernel32.WaitForSingleObject(
                     self._show_event, 0) == WAIT_OBJECT_0:
                 self._tray_open()
 
@@ -486,7 +517,7 @@ class App:
 
 
 def main():
-    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32 = kernel32
     # 显式声明签名，避免 64 位句柄被截断
     k32.CreateMutexW.restype = wintypes.HANDLE
     k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
@@ -535,7 +566,7 @@ def main():
     app.recovery_guard = guard
 
     root.update_idletasks()
-    w = 340
+    w = max(root.winfo_reqwidth(), round(340*root.winfo_fpixels("1i")/96))
     # 高度随内容自适应，确保所有选项都完整可见
     h = root.winfo_reqheight() + 24
     screen_h = root.winfo_screenheight()

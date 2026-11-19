@@ -1,3 +1,4 @@
+import math
 import time
 from tkinter import font as tkfont
 
@@ -23,7 +24,8 @@ class ClockFace:
         extra=df.metrics('linespace') if weather else 0
         width=max(width,df.measure(weather)+pad*2)
         height+=extra
-        if st['shape']=='圆形':width=height=max(width,height)
+        content_height=height
+        if st['shape']=='圆形':width=height=math.ceil(math.hypot(width,height))
         c.configure(width=width,height=height)
         if st['shape']!='透明':
             if st['shape']=='圆形':c.create_oval(1,1,width-1,height-1,fill=st['background'],outline='')
@@ -60,6 +62,6 @@ class ClockFace:
             y=(height-extra-th-dh)/2
             lettering(width/2,y,text=clock,font=f,fill=fg,anchor='n')
             if dh:lettering(width/2,y+th,text=date,font=df,fill=fg,anchor='n')
-        if weather:lettering(width/2,height-pad,text=weather,font=df,fill=fg,anchor='s')
+        if weather:lettering(width/2,(height+content_height)/2-pad,text=weather,font=df,fill=fg,anchor='s')
 
 
