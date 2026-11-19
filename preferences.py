@@ -66,19 +66,18 @@ def load_config():
             return {}
 
     cfg = read_dict(CONFIG_PATH)
-    merged = dict(cfg)
-    merged.update(DEFAULT_CONFIG)
+    merged = {**DEFAULT_CONFIG, **cfg}
     if not isinstance(merged.get("widgets"), dict):
         legacy = os.path.join(os.path.dirname(CONFIG_PATH), "desktop_widgets.json")
         merged["widgets"] = read_dict(legacy)
-    if isinstance(cfg.get("last_visible"),bool):
-        merged["last_visible"]=cfg["last_visible"]
-    if isinstance(cfg.get("auto"), bool):
-        merged["auto"] = cfg["auto"]
-    if cfg.get("zone") in ("top", "any", "corner"):
-        merged["zone"] = cfg["zone"]
-    if str(cfg.get("delay")) in ("5", "10", "20"):
-        merged["delay"] = str(cfg["delay"])
+    if not isinstance(merged.get("last_visible"), bool):
+        merged.pop("last_visible", None)
+    if not isinstance(merged["auto"], bool):
+        merged["auto"] = DEFAULT_CONFIG["auto"]
+    if merged["zone"] not in ("top", "any", "corner"):
+        merged["zone"] = DEFAULT_CONFIG["zone"]
+    delay = str(merged["delay"])
+    merged["delay"] = delay if delay in ("5", "10", "20") else DEFAULT_CONFIG["delay"]
     return merged
 
 

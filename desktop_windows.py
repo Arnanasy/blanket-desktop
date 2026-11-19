@@ -1,6 +1,6 @@
 import ctypes
 from ctypes import wintypes
-from desktop_widgets import bounds
+from display_geometry import bounds
 
 SW_HIDE=0
 SW_SHOW=5

@@ -234,8 +234,11 @@ class SystemMonitor:
             tk.Scale(box,label=title,from_=lo,to=hi,orient='horizontal',variable=vars[key],command=change).pack(fill='x')
         def choose(key):
             color=colorchooser.askcolor(self.cfg[key],parent=d)[1]
-            if color:self.cfg[key]=color;self.apply()
+            if color:
+                vars[key].set(color)
+                change()
         for key,title in [('fg','文字颜色'),('bg','卡片颜色')]:
+            vars[key] = tk.StringVar(master=d, value=self.cfg[key])
             ttk.Button(box,text=title,command=lambda k=key:choose(k)).pack(fill='x')
         for key,title in [('cpu','CPU'),('memory','内存'),('net','上传与下载'),('pinned','固定显示')]:
             vars[key]=tk.BooleanVar(value=self.cfg[key])
