@@ -17,7 +17,6 @@ import sys
 sys.dont_write_bytecode = True
 
 import ctypes
-import queue
 import time
 import tkinter as tk
 
@@ -25,11 +24,10 @@ import desktop_recovery
 from desktop_widgets import Widgets
 from desktop_windows import (DesktopClick, get_cursor, icons_visible, set_icons_visible,
                              in_hotzone, input_idle_seconds, invalidate_cache)
-from mouse_events import MouseEvents
 from preferences import load_config, save_config, autostart_enabled, set_autostart, repair_autostart
 from tray_icon import TrayIcon
 from win32 import (kernel32, wtsapi32, toplevel_hwnd, key_down, ERROR_ALREADY_EXISTS,
-                   EVENT_MODIFY_STATE, WAIT_OBJECT_0, NOTIFY_FOR_THIS_SESSION, WM_LBUTTONDOWN,
+                   EVENT_MODIFY_STATE, WAIT_OBJECT_0, NOTIFY_FOR_THIS_SESSION,
                    VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_CONTROL, VK_MENU, VK_H, VK_T)
 
 # 单实例与“双击快捷方式唤起主窗口”的跨进程内核对象
@@ -37,9 +35,7 @@ MUTEX_NAME = 'Local\\JingZhuoMian_SingleInstance'
 EVENT_NAME = 'Local\\JingZhuoMian_ShowRequest'
 
 POLL_MS = 150            # 主轮询间隔
-MOUSE_POLL_MS = 20       # 鼠标事件消费间隔
-CLICK_MAX_AGE = 0.18     # 早于此时长的钩子事件视为积压，丢弃
-HOOK_MISS_LIMIT = 3      # 连续多少次桌面点击钩子都没收到，就重装钩子
+MOUSE_POLL_MS = 20       # 鼠标左键轮询间隔（不装全局低级钩子，避免拖慢系统鼠标）
 
 # 配色（Windows 11 简洁浅色风格）
 BG = '#F4F7FC'
@@ -200,13 +196,9 @@ class App:
         self.tray.install()
         wtsapi32.WTSRegisterSessionNotification(top_hwnd, NOTIFY_FOR_THIS_SESSION)
 
-        # 点桌面空白处切换图标（优先使用钩子队列，钩子不可用时轮询左键）
+        # 点桌面空白处切换图标：使用轻量 20ms 轮询，不安装 WH_MOUSE_LL 全局钩子，
+        # 避免 Python GIL 阻塞系统级鼠标消息导致任务栏/游戏里鼠标迟钝
         self.desktop_click = DesktopClick(self._click_unavailable)
-        self.mouse_events = MouseEvents()
-        self._mouse_down = None
-        self._lb_seen = False         # 钩子健康检查：轮询看到的左键状态
-        self._lb_press = None         # 轮询看到按下的时刻
-        self._hook_misses = 0
         self.widgets = Widgets(self)
         self.restore_visibility()
 
@@ -223,62 +215,19 @@ class App:
             '桌面点击', 'Windows 暂时无法识别桌面空白。可用托盘图标或 Ctrl + Alt + H 切换。', parent=self.root))
 
     def discard_mouse(self):
-        """菜单或对话框关闭后丢弃之前积压的点击，避免误触发切换。"""
-        self.mouse_cutoff = time.monotonic()
-        self._mouse_down = None
+        """菜单或对话框关闭后短暂忽略点击，避免松手瞬间误触发桌面切换。"""
+        self.mouse_cutoff = time.monotonic() + 0.12
+        self.desktop_click.reset()
 
     def poll_mouse(self):
         try:
-            if self.mouse_events.hook and self._hook_healthy():
-                self._consume_hook_events()
+            if self.widgets.busy or time.monotonic() <= self.mouse_cutoff:
+                self.desktop_click.reset()
             elif self.desktop_click.check():
                 self._blank_click()
         finally:
             if not self._quitting:
                 self.root.after(MOUSE_POLL_MS, self.poll_mouse)
-
-    def _consume_hook_events(self):
-        for _ in range(100):
-            try:
-                when, msg, x, y = self.mouse_events.events.get_nowait()
-            except queue.Empty:
-                break
-            if when <= self.mouse_cutoff or time.monotonic() - when > CLICK_MAX_AGE or self.widgets.busy:
-                self._mouse_down = None
-                continue
-            if msg == WM_LBUTTONDOWN:
-                self._mouse_down = (x, y, self.desktop_click.is_blank_click(x, y))
-            elif self._mouse_down:
-                dx, dy, blank = self._mouse_down
-                self._mouse_down = None
-                if blank and abs(x - dx) + abs(y - dy) <= DesktopClick.DRAG_THRESHOLD \
-                        and self.desktop_click.is_blank_click(x, y):
-                    self._blank_click()
-
-    def _hook_healthy(self):
-        """低级鼠标钩子回调超时（例如主线程长时间占用 GIL）会被系统静默移除。
-        这里用轮询到的桌面左键按下来交叉验证：连续多次钩子都没收到，就重装钩子。"""
-        now = time.monotonic()
-        down = key_down(VK_LBUTTON)
-        if down and not self._lb_seen:
-            x, y = get_cursor()
-            if self.desktop_click.over_desktop(x, y):
-                self._lb_press = now
-        self._lb_seen = down
-        if self._lb_press is not None and now - self._lb_press > 0.5:
-            if self.mouse_events.last_down >= self._lb_press - 0.5:
-                self._hook_misses = 0
-            else:
-                self._hook_misses += 1
-            self._lb_press = None
-            if self._hook_misses >= HOOK_MISS_LIMIT:
-                self._hook_misses = 0
-                self.mouse_events.close()
-                self.mouse_events = MouseEvents()
-                self.desktop_click.reset()
-                self._mouse_down = None
-                return bool(self.mouse_events.hook)
-        return True
 
     # ------------------------------------------------------------ 托盘回调
     def _tray_toggle(self):
@@ -445,7 +394,6 @@ class App:
         self.widgets.save()          # 会一并保存 self.cfg
         self.widgets.worker.shutdown(wait=False, cancel_futures=True)
         wtsapi32.WTSUnRegisterSessionNotification(self.tray.hwnd)
-        self.mouse_events.close(timeout=0.05)
         # 退出前确保桌面图标恢复显示（异步触发，不阻塞等待资源管理器重绘）
         if state is False:
             set_icons_visible(True, async_=True)
