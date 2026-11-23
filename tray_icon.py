@@ -1,7 +1,7 @@
 """系统托盘图标：左键切换图标显示/隐藏，右键弹出菜单。"""
 import ctypes
-from ctypes import wintypes
 from pathlib import Path
+import queue
 
 from win32 import (user32, gdi32, shell32, NOTIFYICONDATAW, ICONINFO, WNDPROC, SetWindowLongPtr,
                    GWLP_WNDPROC, WM_NULL, WM_APP, WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP, WM_DISPLAYCHANGE,
@@ -30,9 +30,9 @@ class TrayIcon:
         self.on_resume = lambda: None
         self.menu_closed = lambda: None
         self.on_theme = None
-        # 弹出菜单的调度器。TrackPopupMenu 是模态循环，不应在窗口过程里同步执行，
-        # 由 App 设为 root.after_idle，让菜单在 Tk 空闲时再弹出。
-        self.schedule = lambda func: func()
+        # WNDPROC 处于 Tcl DispatchMessage 重入栈内，绝不能直接调 Tk 的 after/after_idle；
+        # 只把事件放进纯 Python 队列，由主循环在正常 Tk 上下文里调用 process_events() 消费。
+        self._events = queue.SimpleQueue()
         self._taskbar_created = user32.RegisterWindowMessageW('TaskbarCreated')
 
     # 图标文件缺失时，用 GDI 自绘一个蓝色圆角 + 白色小窗口的图标
@@ -126,35 +126,55 @@ class TrayIcon:
         elif cmd == IDM_QUIT:
             self._on_quit()
 
+    def process_events(self):
+        """在主线程正常 Tk 回调中调用，消费 WNDPROC 排入的托盘与系统恢复事件。"""
+        while True:
+            try:
+                event = self._events.get_nowait()
+            except queue.Empty:
+                return
+            if event == 'left':
+                self._on_left()
+            elif event == 'right':
+                self._show_menu()
+            elif event == 'resume':
+                self.on_resume()
+            elif event == 'open':
+                self._on_open()
+            elif event == 'theme' and self.on_theme:
+                self.on_theme()
+            elif event == 'quit':
+                self._on_quit()
+
     def _wndproc(self, hwnd, msg, wparam, lparam):
         resumed = ((msg == WM_WTSSESSION_CHANGE and wparam == WTS_SESSION_UNLOCK)
                    or (msg == WM_POWERBROADCAST and wparam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC))
                    or msg == WM_DISPLAYCHANGE)
         if resumed:
-            self.on_resume()
+            self._events.put('resume')
         if self._taskbar_created and msg == self._taskbar_created:
             # 资源管理器重启后需要重新添加托盘图标
-            self.on_resume()
+            self._events.put('resume')
             self._add_icon()
             return 0
         if msg == WM_TRAY:
             mouse = lparam & 0xFFFF
             if mouse == WM_LBUTTONUP:
-                self._on_left()
+                self._events.put('left')
                 return 0
             if mouse == WM_RBUTTONUP:
-                self.schedule(self._show_menu)
+                self._events.put('right')
                 return 0
         elif msg == WM_COMMAND:
             cmd = wparam & 0xFFFF
             if cmd == IDM_OPEN:
-                self._on_open()
+                self._events.put('open')
                 return 0
             if cmd == IDM_THEME and self.on_theme:
-                self.on_theme()
+                self._events.put('theme')
                 return 0
             if cmd == IDM_QUIT:
-                self._on_quit()
+                self._events.put('quit')
                 return 0
         return user32.CallWindowProcW(self._old_proc, hwnd, msg, wparam, lparam)
 

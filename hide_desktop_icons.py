@@ -182,15 +182,11 @@ class App:
 
         root.protocol('WM_DELETE_WINDOW', self.hide_window)
 
-        # 系统托盘图标：左键切换显示/隐藏，右键菜单（用 after(0) 立即响应，不被轮询推迟）
+        # 系统托盘图标：WNDPROC 只入队，由 poll_mouse 在正常 Tk 上下文里消费，彻底杜绝 Tcl 重入崩溃
         top_hwnd = toplevel_hwnd(root)
-        self.tray = TrayIcon(top_hwnd,
-                             lambda: root.after(0, self._tray_toggle),
-                             lambda: root.after(0, self._tray_open),
-                             lambda: root.after(0, self.quit_app))
-        self.tray.on_resume = lambda: root.after(0, self.resume_desktop)
-        self.tray.on_theme = lambda: root.after(0, self.toggle_theme)
-        self.tray.schedule = lambda fn: root.after(0, fn)
+        self.tray = TrayIcon(top_hwnd, self._tray_toggle, self._tray_open, self.quit_app)
+        self.tray.on_resume = self.resume_desktop
+        self.tray.on_theme = self.toggle_theme
         self.mouse_cutoff = 0
         self.tray.menu_closed = self.discard_mouse
         self.tray.install()
@@ -221,6 +217,9 @@ class App:
 
     def poll_mouse(self):
         try:
+            self.tray.process_events()
+            if self._quitting:
+                return
             if self.widgets.busy or time.monotonic() <= self.mouse_cutoff:
                 self.desktop_click.reset()
             elif self.desktop_click.check():
