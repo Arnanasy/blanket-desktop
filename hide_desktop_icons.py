@@ -5,70 +5,70 @@
 
 功能：
 - 点桌面空白：在桌面空白处左键单击即切换图标显示/隐藏，点图标不受影响
-- 系统托盘：左键单击切换图标显示/隐藏，右键菜单（打开设置、退出程序）
+- 系统托盘：左键单击切换图标显示/隐藏，右键菜单（打开设置、切换主题、退出程序）
 - 自动模式：鼠标移到屏幕热区（默认顶部边缘）只唤出桌面图标，不弹设置窗口，
             鼠标静止无操作达设定时间后自动隐藏，桌面只剩壁纸
-- 手动切换：按快捷键 Ctrl + Alt + H（GetAsyncKeyState 轮询，可靠）
-- 打开设置：右键托盘选“打开设置”，或双击“净桌面”快捷方式；单实例不重复开进程
-- 开机自启：可在程序内开关，写入当前用户注册表 Run 项，无需管理员权限
-- 退出方便：托盘右键或窗口内点“退出程序”，也可“隐藏窗口”仅保留后台运行
+- 手动切换：Ctrl + Alt + H 切换图标，Ctrl + Alt + T 切换深浅主题
+- 打开设置：右键托盘选“打开设置”，或再次双击快捷方式；单实例不重复开进程
+- 开机自启：写入当前用户注册表 Run 项，无需管理员权限；程序文件夹移动后自动修正
 - 不重启资源管理器，图标切换即时生效、完全可逆
 """
-
 import sys
 sys.dont_write_bytecode = True
-import time
+
 import ctypes
-from ctypes import wintypes
-import tkinter as tk
-from desktop_widgets import Widgets
-from tray_icon import TrayIcon
-from preferences import load_config, save_config, autostart_enabled, set_autostart
-from desktop_windows import DesktopClick, user32, get_cursor, icons_visible, set_icons_visible, in_hotzone, input_idle_seconds, invalidate_cache
-import desktop_recovery
-from mouse_events import MouseEvents
 import queue
+import time
+import tkinter as tk
 
-# ---------------------------------------------------------------- 常量
-SW_HIDE = 0
-SW_SHOW = 5
-
-# 虚拟键码
-VK_CONTROL = 0x11
-VK_MENU = 0x12      # Alt
-VK_H = 0x48
-VK_T = 0x54
+import desktop_recovery
+from desktop_widgets import Widgets
+from desktop_windows import (DesktopClick, get_cursor, icons_visible, set_icons_visible,
+                             in_hotzone, input_idle_seconds, invalidate_cache)
+from mouse_events import MouseEvents
+from preferences import load_config, save_config, autostart_enabled, set_autostart, repair_autostart
+from tray_icon import TrayIcon
+from win32 import (kernel32, wtsapi32, toplevel_hwnd, key_down, ERROR_ALREADY_EXISTS,
+                   EVENT_MODIFY_STATE, WAIT_OBJECT_0, NOTIFY_FOR_THIS_SESSION, WM_LBUTTONDOWN,
+                   VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_CONTROL, VK_MENU, VK_H, VK_T)
 
 # 单实例与“双击快捷方式唤起主窗口”的跨进程内核对象
-MUTEX_NAME = "Local\\JingZhuoMian_SingleInstance"
-EVENT_NAME = "Local\\JingZhuoMian_ShowRequest"
-ERROR_ALREADY_EXISTS = 183
-EVENT_MODIFY_STATE = 0x0002
-WAIT_OBJECT_0 = 0
+MUTEX_NAME = 'Local\\JingZhuoMian_SingleInstance'
+EVENT_NAME = 'Local\\JingZhuoMian_ShowRequest'
+
+POLL_MS = 150            # 主轮询间隔
+MOUSE_POLL_MS = 20       # 鼠标事件消费间隔
+CLICK_MAX_AGE = 0.18     # 早于此时长的钩子事件视为积压，丢弃
+HOOK_MISS_LIMIT = 3      # 连续多少次桌面点击钩子都没收到，就重装钩子
 
 # 配色（Windows 11 简洁浅色风格）
-BG = "#F4F7FC"
-BLUE = "#2563EB"
-BLUE_D = "#1D4ED8"
-GREEN = "#16A34A"
-GREEN_D = "#15803D"
-GRAY = "#94A3B8"
-RED = "#DC2626"
-RED_D = "#B91C1C"
-TEXT = "#1E293B"
-SUBTEXT = "#64748B"
-WHITE = "#FFFFFF"
+BG = '#F4F7FC'
+BLUE = '#2563EB'
+BLUE_D = '#1D4ED8'
+GREEN = '#16A34A'
+GREEN_D = '#15803D'
+GRAY = '#94A3B8'
+RED = '#DC2626'
+RED_D = '#B91C1C'
+TEXT = '#1E293B'
+SUBTEXT = '#64748B'
+WHITE = '#FFFFFF'
 
 # 主窗口深色配色（跟随系统主题一键切换）
-DARK_BG = "#0F172A"
-DARK_TEXT = "#E2E8F0"
-DARK_SUBTEXT = "#94A3B8"
-DARK_PANEL = "#1E293B"
-DARK_PANEL_HI = "#334155"
-DARK_SELECT = "#1E293B"
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-kernel32.WaitForSingleObject.restype = wintypes.DWORD
+DARK_BG = '#0F172A'
+DARK_TEXT = '#E2E8F0'
+DARK_SUBTEXT = '#94A3B8'
+DARK_PANEL = '#1E293B'
+DARK_PANEL_HI = '#334155'
+DARK_SELECT = '#1E293B'
+
+
+def _system_dark():
+    try:
+        from theme_switch import is_dark
+        return is_dark()
+    except ImportError:
+        return False
 
 
 class App:
@@ -76,202 +76,212 @@ class App:
         self.root = root
         self.cfg = load_config()
         self._show_event = show_event
-        root.title("净桌面")
+        # 启动时要恢复的图标状态必须先取出来：恢复完成前 refresh_ui 不得覆盖它
+        self._restore_target = self.cfg.get('last_visible')
+        self._restoring = True
+        self._ui_state = 'unset'
+        self._quitting = False
+        self.recovery_guard = None
+        root.title('净桌面')
         root.configure(bg=BG)
         root.resizable(False, False)
 
-        f_title = ("Microsoft YaHei UI", 16, "bold")
-        f_sub = ("Microsoft YaHei UI", 9)
-        f_btn = ("Microsoft YaHei UI", 12, "bold")
-        f_state = ("Microsoft YaHei UI", 10, "bold")
-        f_normal = ("Microsoft YaHei UI", 9)
-        f_small = ("Microsoft YaHei UI", 8)
+        f_title = ('Microsoft YaHei UI', 16, 'bold')
+        f_sub = ('Microsoft YaHei UI', 9)
+        f_btn = ('Microsoft YaHei UI', 12, 'bold')
+        f_state = ('Microsoft YaHei UI', 10, 'bold')
+        f_normal = ('Microsoft YaHei UI', 9)
+        f_small = ('Microsoft YaHei UI', 8)
 
-        tk.Label(root, text="净桌面", font=f_title, bg=BG, fg=TEXT).pack(pady=(18, 2))
-        tk.Label(root, text="鼠标移到屏幕边缘自动显示，移开只剩壁纸",
+        tk.Label(root, text='净桌面', font=f_title, bg=BG, fg=TEXT).pack(pady=(18, 2))
+        tk.Label(root, text='鼠标移到屏幕边缘自动显示，移开只剩壁纸',
                  font=f_sub, bg=BG, fg=SUBTEXT).pack(pady=(0, 12))
 
         # 主切换按钮
-        self.btn = tk.Button(root, text="立即隐藏", font=f_btn,
+        self.btn = tk.Button(root, text='立即隐藏', font=f_btn,
                              bg=BLUE, fg=WHITE, activebackground=BLUE_D,
-                             activeforeground=WHITE, relief="flat",
-                             borderwidth=0, cursor="hand2",
+                             activeforeground=WHITE, relief='flat',
+                             borderwidth=0, cursor='hand2',
                              width=20, pady=10, command=self.manual_toggle)
         self.btn.pack(padx=24)
 
         # 状态行
         state_frame = tk.Frame(root, bg=BG)
         state_frame.pack(pady=(12, 4))
-        self.dot_canvas = tk.Canvas(state_frame, width=14, height=14,
-                                    bg=BG, highlightthickness=0)
-        self.dot_canvas.pack(side="left", padx=(0, 8))
-        self.dot = self.dot_canvas.create_oval(1, 1, 13, 13,
-                                               fill=GREEN, outline=GREEN)
-        self.state_label = tk.Label(state_frame, text="桌面图标显示中",
-                                    font=f_state, bg=BG, fg=TEXT)
-        self.state_label.pack(side="left")
+        self.dot_canvas = tk.Canvas(state_frame, width=14, height=14, bg=BG, highlightthickness=0)
+        self.dot_canvas.pack(side='left', padx=(0, 8))
+        self.dot = self.dot_canvas.create_oval(1, 1, 13, 13, fill=GREEN, outline=GREEN)
+        self.state_label = tk.Label(state_frame, text='桌面图标显示中', font=f_state, bg=BG, fg=TEXT)
+        self.state_label.pack(side='left')
 
         # 设置区
         opt = tk.Frame(root, bg=BG)
-        opt.pack(fill="x", padx=24, pady=(10, 2))
+        opt.pack(fill='x', padx=24, pady=(10, 2))
 
-        self.auto_var = tk.BooleanVar(value=bool(self.cfg["auto"]))
-        tk.Checkbutton(opt, text="自动模式（鼠标热区驱动）",
-                       variable=self.auto_var, font=f_normal, bg=BG,
-                       fg=TEXT, activebackground=BG, selectcolor=WHITE,
-                       anchor="w", command=self._persist
-                       ).pack(anchor="w")
+        def check(text, variable, command, **pack):
+            tk.Checkbutton(opt, text=text, variable=variable, font=f_normal, bg=BG, fg=TEXT,
+                           activebackground=BG, selectcolor=WHITE, anchor='w',
+                           command=command).pack(anchor='w', **pack)
 
+        def caption(text):
+            tk.Label(opt, text=text, font=f_normal, bg=BG, fg=TEXT, anchor='w').pack(anchor='w', pady=(8, 0))
+
+        self.auto_var = tk.BooleanVar(value=bool(self.cfg['auto']))
+        check('自动模式（鼠标热区驱动）', self.auto_var, self._persist)
+
+        repair_autostart()     # 程序文件夹移动过时，修正注册表里的旧路径
         self.startup_var = tk.BooleanVar(value=autostart_enabled())
-        tk.Checkbutton(opt, text="开机自启（登录后自动运行）",
-                       variable=self.startup_var, font=f_normal, bg=BG,
-                       fg=TEXT, activebackground=BG, selectcolor=WHITE,
-                       anchor="w", command=self._toggle_autostart
-                       ).pack(anchor="w", pady=(6, 0))
+        check('开机自启（登录后自动运行）', self.startup_var, self._toggle_autostart, pady=(6, 0))
 
-        tk.Label(opt, text="热区位置：", font=f_normal, bg=BG,
-                 fg=TEXT, anchor="w").pack(anchor="w", pady=(8, 0))
-        self.zone_var = tk.StringVar(value=self.cfg["zone"])
-        zones = [("顶部边缘", "top"), ("屏幕任意边缘", "any"), ("左上角", "corner")]
-        for text, val in zones:
+        caption('热区位置：')
+        self.zone_var = tk.StringVar(value=self.cfg['zone'])
+        for text, val in [('顶部边缘', 'top'), ('屏幕任意边缘', 'any'), ('左上角', 'corner')]:
             tk.Radiobutton(opt, text=text, variable=self.zone_var, value=val,
                            font=f_normal, bg=BG, fg=TEXT, activebackground=BG,
-                           selectcolor=WHITE, anchor="w",
-                           command=self._persist).pack(anchor="w")
+                           selectcolor=WHITE, anchor='w', command=self._persist).pack(anchor='w')
 
-        tk.Label(opt, text="无操作后自动隐藏：", font=f_normal, bg=BG,
-                 fg=TEXT, anchor="w").pack(anchor="w", pady=(8, 0))
+        caption('无操作后自动隐藏：')
         delay_row = tk.Frame(opt, bg=BG)
-        delay_row.pack(anchor="w")
-        self.delay_var = tk.StringVar(value=str(self.cfg["delay"]))
-        for text, val in [("5秒", "5"), ("10秒", "10"), ("20秒", "20")]:
-            tk.Radiobutton(delay_row, text=text, variable=self.delay_var,
-                           value=val, font=f_normal, bg=BG, fg=TEXT,
-                           activebackground=BG, selectcolor=WHITE,
-                           command=self._persist
-                           ).pack(side="left")
+        delay_row.pack(anchor='w')
+        self.delay_var = tk.StringVar(value=str(self.cfg['delay']))
+        for text, val in [('5秒', '5'), ('10秒', '10'), ('20秒', '20')]:
+            tk.Radiobutton(delay_row, text=text, variable=self.delay_var, value=val,
+                           font=f_normal, bg=BG, fg=TEXT, activebackground=BG,
+                           selectcolor=WHITE, command=self._persist).pack(side='left')
 
-        tk.Label(root, text="Ctrl+Alt+H 切换图标 · Ctrl+Alt+T 切换主题",
+        tk.Label(root, text='Ctrl+Alt+H 切换图标 · Ctrl+Alt+T 切换主题',
                  font=f_small, bg=BG, fg=SUBTEXT).pack(pady=(10, 2))
 
         actions = tk.Frame(root, bg=BG)
-        actions.pack(fill="x", padx=24, pady=(6, 12))
-        actions.columnconfigure((0, 1), weight=1, uniform="action")
+        actions.pack(fill='x', padx=24, pady=(6, 12))
+        actions.columnconfigure((0, 1), weight=1, uniform='action')
         self.neutral_buttons = set()
-        def action(label, command, row, column, danger=False):
+
+        def action(label, command, row, column, danger=False, columnspan=1):
             button = tk.Button(actions, text=label, command=command, font=f_normal,
-                               bg=RED if danger else "#E2E8F0", fg=WHITE if danger else TEXT,
-                               activebackground=RED_D if danger else "#CBD5E1",
-                               relief="flat", borderwidth=0, cursor="hand2", pady=7)
-            if not danger:self.neutral_buttons.add(button)
-            button.grid(row=row, column=column, sticky="ew", padx=3, pady=3)
+                               bg=RED if danger else '#E2E8F0', fg=WHITE if danger else TEXT,
+                               activebackground=RED_D if danger else '#CBD5E1',
+                               relief='flat', borderwidth=0, cursor='hand2', pady=7)
+            if not danger:
+                self.neutral_buttons.add(button)
+            button.grid(row=row, column=column, columnspan=columnspan, sticky='ew', padx=3, pady=3)
             return button
 
-        action("桌面组件设置", lambda: self.widgets.settings(), 0, 0)
-        self.pause_button = action("暂停自动隐藏", self.pause_auto, 0, 1)
-        action("隐藏窗口", self.hide_window, 1, 0)
-        action("退出程序", self.quit_app, 1, 1, danger=True)
-        self.theme_button = tk.Button(actions, text="切换深浅主题", command=self.toggle_theme, font=f_normal,
-                                       bg="#E2E8F0", fg=TEXT, activebackground="#CBD5E1",
-                                       relief="flat", borderwidth=0, cursor="hand2", pady=7)
-        self.neutral_buttons.add(self.theme_button)
-        self.theme_button.grid(row=2, column=0, columnspan=2, sticky="ew", padx=3, pady=3)
-        try:
-            from theme_switch import is_dark
-            self.theme_button.config(text="☀ 切换为浅色主题" if is_dark() else "☾ 切换为深色主题")
-        except ImportError:
-            pass
+        action('桌面组件设置', lambda: self.widgets.settings(), 0, 0)
+        self.pause_button = action('暂停自动隐藏', self.pause_auto, 0, 1)
+        action('隐藏窗口', self.hide_window, 1, 0)
+        action('退出程序', self.quit_app, 1, 1, danger=True)
+        self.theme_button = action('', self.toggle_theme, 2, 0, columnspan=2)
+        self._update_theme_label(_system_dark())
         self._paused = False
 
         # 运行状态
         self._in_zone = False
         self._hk_held = False
         self._theme_held = False
-        _x0, _y0 = get_cursor()
-        self._last_x, self._last_y = _x0, _y0
+        self._last_x, self._last_y = get_cursor()
         self._last_activity = time.monotonic()
         self._grace_until = time.monotonic() + 5  # 启动 5 秒宽限，先看清界面
 
-        root.protocol("WM_DELETE_WINDOW", self.hide_window)
+        root.protocol('WM_DELETE_WINDOW', self.hide_window)
 
-        # 系统托盘图标：左键切换显示/隐藏，右键菜单（打开设置、退出）
-        root.update_idletasks()
-        # winfo_id 是 Tk 内部子窗口(TkChild)，需向上找到真正的顶层窗口
-        user32.GetParent.argtypes = [wintypes.HWND]
-        user32.GetParent.restype = wintypes.HWND
-        top_hwnd = root.winfo_id()
-        while True:
-            parent = user32.GetParent(top_hwnd)
-            if not parent:
-                break
-            top_hwnd = parent
+        # 系统托盘图标：左键切换显示/隐藏，右键菜单
+        top_hwnd = toplevel_hwnd(root)
         self.tray = TrayIcon(top_hwnd,
                              lambda: root.after_idle(self._tray_toggle),
                              lambda: root.after_idle(self._tray_open),
                              lambda: root.after_idle(self.quit_app))
-        self.tray.on_resume=lambda:self.root.after_idle(self.resume_desktop)
-        self.tray.on_theme=lambda:self.root.after_idle(self.toggle_theme)
+        self.tray.on_resume = lambda: root.after_idle(self.resume_desktop)
+        self.tray.on_theme = lambda: root.after_idle(self.toggle_theme)
+        self.tray.schedule = root.after_idle
         self.mouse_cutoff = 0
         self.tray.menu_closed = self.discard_mouse
         self.tray.install()
-        ctypes.windll.wtsapi32.WTSRegisterSessionNotification(wintypes.HWND(top_hwnd),0)
+        wtsapi32.WTSRegisterSessionNotification(top_hwnd, NOTIFY_FOR_THIS_SESSION)
 
-        # 点桌面空白处切换图标显示/隐藏（优先使用钩子队列，安装失败时轮询）
+        # 点桌面空白处切换图标（优先使用钩子队列，钩子不可用时轮询左键）
         self.desktop_click = DesktopClick(self._click_unavailable)
         self.mouse_events = MouseEvents()
         self._mouse_down = None
+        self._lb_seen = False         # 钩子健康检查：轮询看到的左键状态
+        self._lb_press = None         # 轮询看到按下的时刻
+        self._hook_misses = 0
         self.widgets = Widgets(self)
-        self.restore_visibility(0)
+        self.restore_visibility()
 
         self._persist()
         self.refresh_ui()
-        try:
-            from theme_switch import is_dark
-            self._restyle(is_dark())
-        except ImportError:
-            pass
-        self.root.after(150, self.poll)
+        self._restyle(_system_dark())
+        self.root.after(POLL_MS, self.poll)
         self.root.after(10, self.poll_mouse)
 
-    # 每轮只消费钩子队列或执行左键轮询，两者互斥。
+    # ------------------------------------------------------------ 鼠标
     def _click_unavailable(self):
         from tkinter import messagebox
         self.root.after_idle(lambda: messagebox.showinfo(
-            "桌面点击", "Windows 暂时无法识别桌面空白。可用托盘图标或 Ctrl + Alt + H 切换。", parent=self.root))
+            '桌面点击', 'Windows 暂时无法识别桌面空白。可用托盘图标或 Ctrl + Alt + H 切换。', parent=self.root))
 
     def discard_mouse(self):
+        """菜单或对话框关闭后丢弃之前积压的点击，避免误触发切换。"""
         self.mouse_cutoff = time.monotonic()
         self._mouse_down = None
 
     def poll_mouse(self):
-        if self.mouse_events.hook:
-            for _ in range(100):
-                try:
-                    when, msg, x, y = self.mouse_events.events.get_nowait()
-                except queue.Empty:
-                    break
-                if when <= self.mouse_cutoff or time.monotonic()-when > 0.18 or self.widgets.busy:
-                    self._mouse_down=None
-                    continue
-                if msg == 0x201:
-                    self._mouse_down = (x, y, self.desktop_click._is_blank_click(x,y))
-                elif self._mouse_down:
-                    dx,dy,blank = self._mouse_down
-                    self._mouse_down = None
-                    if blank and abs(x-dx)+abs(y-dy)<=6 and self.desktop_click._is_blank_click(x,y):
-                        self._blank_click()
-        elif self.desktop_click.check():
-            self._blank_click()
-        self.root.after(20, self.poll_mouse)
+        try:
+            if self.mouse_events.hook and self._hook_healthy():
+                self._consume_hook_events()
+            elif self.desktop_click.check():
+                self._blank_click()
+        finally:
+            if not self._quitting:
+                self.root.after(MOUSE_POLL_MS, self.poll_mouse)
 
-    # 托盘回调
+    def _consume_hook_events(self):
+        for _ in range(100):
+            try:
+                when, msg, x, y = self.mouse_events.events.get_nowait()
+            except queue.Empty:
+                break
+            if when <= self.mouse_cutoff or time.monotonic() - when > CLICK_MAX_AGE or self.widgets.busy:
+                self._mouse_down = None
+                continue
+            if msg == WM_LBUTTONDOWN:
+                self._mouse_down = (x, y, self.desktop_click.is_blank_click(x, y))
+            elif self._mouse_down:
+                dx, dy, blank = self._mouse_down
+                self._mouse_down = None
+                if blank and abs(x - dx) + abs(y - dy) <= DesktopClick.DRAG_THRESHOLD \
+                        and self.desktop_click.is_blank_click(x, y):
+                    self._blank_click()
+
+    def _hook_healthy(self):
+        """低级鼠标钩子回调超时（例如主线程长时间占用 GIL）会被系统静默移除。
+        这里用轮询到的桌面左键按下来交叉验证：连续多次钩子都没收到，就重装钩子。"""
+        now = time.monotonic()
+        down = key_down(VK_LBUTTON)
+        if down and not self._lb_seen:
+            x, y = get_cursor()
+            if self.desktop_click.over_desktop(x, y):
+                self._lb_press = now
+        self._lb_seen = down
+        if self._lb_press is not None and now - self._lb_press > 0.5:
+            if self.mouse_events.last_down >= self._lb_press - 0.5:
+                self._hook_misses = 0
+            else:
+                self._hook_misses += 1
+            self._lb_press = None
+            if self._hook_misses >= HOOK_MISS_LIMIT:
+                self._hook_misses = 0
+                self.mouse_events.close()
+                self.mouse_events = MouseEvents()
+                self.desktop_click.reset()
+                self._mouse_down = None
+                return bool(self.mouse_events.hook)
+        return True
+
+    # ------------------------------------------------------------ 托盘回调
     def _tray_toggle(self):
-        vis = icons_visible()
-        if vis is None:
-            return
-        set_icons_visible(not vis)
-        self._last_activity = time.monotonic()
-        self.refresh_ui()
+        self.manual_toggle()
 
     def _tray_open(self):
         self._grace_until = time.monotonic() + 5
@@ -279,43 +289,41 @@ class App:
         self.root.lift()
         self._last_activity = time.monotonic()
 
-    # 点桌面空白处：切换图标显示/隐藏
     def _blank_click(self):
+        """点桌面空白处：切换图标显示/隐藏。"""
+        self.manual_toggle()
+
+    # ------------------------------------------------------------ 操作
+    def manual_toggle(self):
         vis = icons_visible()
         if vis is None:
+            self.state_label.config(text='无法获取桌面状态')
             return
         set_icons_visible(not vis)
         # 刷新活动计时，显示后给用户完整的无操作宽限，避免太快又隐藏
         self._last_activity = time.monotonic()
         self.refresh_ui()
 
-    # ------------------------------------------------------------ 操作
-    def manual_toggle(self):
-        vis = icons_visible()
-        if vis is None:
-            self.state_label.config(text="无法获取桌面状态")
-            return
-        set_icons_visible(not vis)
-        self._last_activity = time.monotonic()
-        self.refresh_ui()
-
     def pause_auto(self):
         self._paused = not self._paused
-        self.pause_button.config(text="恢复自动隐藏" if self._paused else "暂停自动隐藏")
+        self.pause_button.config(text='恢复自动隐藏' if self._paused else '暂停自动隐藏')
         self._last_activity = time.monotonic()
+
+    def _update_theme_label(self, dark):
+        self.theme_button.config(text='☀ 切换为浅色主题' if dark else '☾ 切换为深色主题')
 
     def toggle_theme(self):
         """一键切换 Windows 深色/浅色主题，应用和浏览器同时生效。"""
         try:
             import theme_switch
             dark = theme_switch.toggle()
-            self._restyle(dark)
-            self.theme_button.config(text="☀ 切换为浅色主题" if dark else "☾ 切换为深色主题")
-            self.widgets.theme()               # 刷新时钟配色
-            self.widgets.refresh_theme_button()
         except OSError as error:
             from tkinter import messagebox
-            messagebox.showerror("主题切换失败", str(error), parent=self.root)
+            messagebox.showerror('主题切换失败', str(error), parent=self.root)
+            return
+        self._restyle(dark)
+        self._update_theme_label(dark)
+        self.widgets.theme()               # 刷新时钟配色与主题按钮
 
     def _restyle(self, dark):
         """让主窗口配色跟随系统深/浅色主题。"""
@@ -326,46 +334,46 @@ class App:
 
         def walk(w):
             cls = w.winfo_class()
-            if cls == "Toplevel":
+            if cls == 'Toplevel':
                 return  # 挂件窗口各自管理配色，不递归
             try:
-                if cls == "Label":
-                    fg = sub if str(w.cget("fg")).lower() in ("#64748b", "#94a3b8") else text
+                if cls == 'Label':
+                    fg = sub if str(w.cget('fg')).lower() in ('#64748b', '#94a3b8') else text
                     w.configure(bg=bg, fg=fg)
-                elif cls == "Frame":
+                elif cls in ('Frame', 'Canvas'):
                     w.configure(bg=bg)
-                elif cls == "Canvas":
-                    w.configure(bg=bg)
-                elif cls in ("Checkbutton", "Radiobutton"):
+                elif cls in ('Checkbutton', 'Radiobutton'):
                     w.configure(bg=bg, activebackground=bg, activeforeground=text, fg=text, selectcolor=select)
-                elif cls == "Button":
-                    if w in self.neutral_buttons:
-                        w.configure(bg=DARK_PANEL if dark else "#E2E8F0",
-                                    activebackground=DARK_PANEL_HI if dark else "#CBD5E1",
-                                    fg=text, activeforeground=text)
+                elif cls == 'Button' and w in self.neutral_buttons:
+                    w.configure(bg=DARK_PANEL if dark else '#E2E8F0',
+                                activebackground=DARK_PANEL_HI if dark else '#CBD5E1',
+                                fg=text, activeforeground=text)
                 for child in w.winfo_children():
                     walk(child)
             except tk.TclError:
                 pass
 
+        # ttk 控件与 tk.Scale 走全局样式，设置窗口等弹窗同步生效
         from tkinter import ttk
         style = ttk.Style(self.root)
         if style.theme_use() != 'clam':
             style.theme_use('clam')
         style.configure('.', background=bg, foreground=text, fieldbackground=select,
                         troughcolor=bg, selectbackground=BLUE, selectforeground=WHITE)
-        for name in ('TButton','TCheckbutton','TRadiobutton','TCombobox'):
-            style.map(name, foreground=[('disabled',sub),('active',text),('!disabled',text)],
-                      background=[('active',select)], fieldbackground=[('readonly',select)])
-        self.root.option_add('*Scale.background',bg)
-        self.root.option_add('*Scale.foreground',text)
-        self.root.option_add('*Scale.troughColor',select)
-        self.root.option_add('*Toplevel.background',bg)
+        for name in ('TButton', 'TCheckbutton', 'TRadiobutton', 'TCombobox'):
+            style.map(name, foreground=[('disabled', sub), ('active', text), ('!disabled', text)],
+                      background=[('active', select)], fieldbackground=[('readonly', select)])
+        self.root.option_add('*Scale.background', bg)
+        self.root.option_add('*Scale.foreground', text)
+        self.root.option_add('*Scale.troughColor', select)
+        self.root.option_add('*Toplevel.background', bg)
+
         def scales(parent):
             for child in parent.winfo_children():
-                if isinstance(child,tk.Scale):
-                    child.configure(bg=bg,fg=text,troughcolor=select)
+                if isinstance(child, tk.Scale):
+                    child.configure(bg=bg, fg=text, troughcolor=select)
                 scales(child)
+
         scales(self.root)
         self.root.configure(bg=bg)
         walk(self.root)
@@ -377,60 +385,59 @@ class App:
         self.root.withdraw()
 
     def _toggle_autostart(self):
-        ok = set_autostart(self.startup_var.get())
-        if not ok:
+        if not set_autostart(self.startup_var.get()):
             # 写入失败则回退为实际状态
             self.startup_var.set(autostart_enabled())
 
     def _persist(self):
         self.cfg.update({
-            "auto": self.auto_var.get(),
-            "zone": self.zone_var.get(),
-            "delay": self.delay_var.get(),
+            'auto': self.auto_var.get(),
+            'zone': self.zone_var.get(),
+            'delay': self.delay_var.get(),
         })
         save_config(self.cfg)
 
-    def restore_visibility(self,attempt):
-        target=self.cfg.get('last_visible')
-        if target is None:return
-        if icons_visible() is None:
-            if attempt<20:self.root.after(500,lambda:self.restore_visibility(attempt+1))
-        else:set_icons_visible(target)
-
-    def invalidate_desktop(self):
-        invalidate_cache()
+    def restore_visibility(self, attempt=0):
+        """恢复上次退出前的图标状态；资源管理器尚未就绪时每 0.5 秒重试，最多 10 秒。"""
+        if self._restore_target is not None:
+            state = icons_visible()
+            if state is None and attempt < 20:
+                self.root.after(500, lambda: self.restore_visibility(attempt + 1))
+                return
+            if state is not None and state != self._restore_target:
+                set_icons_visible(self._restore_target)
+        self._restoring = False
+        self.refresh_ui()
 
     def resume_desktop(self):
-        self.invalidate_desktop()
-        self.widgets.last_theme=0
-        self.widgets.last_position_check=0
-        self.widgets.last_clock=''
+        """睡眠唤醒、解锁、显示器变化或资源管理器重启后，重新定位桌面窗口并刷新挂件。"""
+        invalidate_cache()
+        self.widgets.last_theme = 0
+        self.widgets.last_position_check = 0
+        self.widgets.last_clock = ''
         self.refresh_ui()
 
     def quit_app(self):
-        if getattr(self, "_quitting", False):
+        if self._quitting:
             return
         self._quitting = True
-        state=icons_visible()
+        state = icons_visible()
         if state is not None:
-            self.cfg['last_visible']=state
-            save_config(self.cfg)
-        self.widgets.save()
-        self.widgets.worker.shutdown(wait=False,cancel_futures=True)
-        ctypes.windll.wtsapi32.WTSUnRegisterSessionNotification(wintypes.HWND(self.tray.hwnd))
-        if getattr(self,"mouse_events",None):
-            self.mouse_events.close()
+            self.cfg['last_visible'] = state
+        self.widgets.save()          # 会一并保存 self.cfg
+        self.widgets.worker.shutdown(wait=False, cancel_futures=True)
+        wtsapi32.WTSUnRegisterSessionNotification(self.tray.hwnd)
+        self.mouse_events.close()
         # 退出前确保桌面图标恢复显示，避免用户找不到图标
         if icons_visible() is False:
             set_icons_visible(True)
-        if icons_visible() is True and getattr(self, 'recovery_guard', None):
+        if icons_visible() is True and self.recovery_guard:
             try:
                 self.recovery_guard.stdin.write(b'restored\n')
                 self.recovery_guard.stdin.close()
             except OSError:
                 pass
-        if getattr(self, "tray", None):
-            self.tray.destroy()
+        self.tray.destroy()
         self.root.destroy()
 
     # ------------------------------------------------------------ 显示恢复
@@ -444,38 +451,38 @@ class App:
 
     # ------------------------------------------------------------ 快捷键
     def check_hotkey(self):
-        ctrl = user32.GetAsyncKeyState(VK_CONTROL) & 0x8000
-        alt = user32.GetAsyncKeyState(VK_MENU) & 0x8000
-        h = user32.GetAsyncKeyState(VK_H) & 0x8000
-        down = bool(ctrl and alt and h)
+        combo = key_down(VK_CONTROL) and key_down(VK_MENU)
+        down = combo and key_down(VK_H)
         if down and not self._hk_held:
-            self._hk_held = True
             self.manual_toggle()
-        elif not down:
-            self._hk_held = False
-        t = user32.GetAsyncKeyState(VK_T) & 0x8000
-        theme_down = bool(ctrl and alt and t)
+        self._hk_held = down
+        theme_down = combo and key_down(VK_T)
         if theme_down and not self._theme_held:
-            self._theme_held = True
             self.toggle_theme()
-        elif not theme_down:
-            self._theme_held = False
+        self._theme_held = theme_down
 
     # ------------------------------------------------------------ 主轮询
     def poll(self):
+        try:
+            self._poll_once()
+        finally:
+            # 即使本轮出错也继续调度，避免一次异常让整个程序停止响应
+            if not self._quitting:
+                self.root.after(POLL_MS, self.poll)
+
+    def _poll_once(self):
         self.check_hotkey()
 
         # 用户双击快捷方式（第二个实例）请求打开设置窗口
-        if self._show_event is not None:
-            if kernel32.WaitForSingleObject(
-                    self._show_event, 0) == WAIT_OBJECT_0:
-                self._tray_open()
+        if self._show_event is not None and \
+                kernel32.WaitForSingleObject(self._show_event, 0) == WAIT_OBJECT_0:
+            self._tray_open()
 
         if self.auto_var.get() and not self._paused and time.monotonic() >= self._grace_until:
             x, y = get_cursor()
 
             # 鼠标位置变化 = 用户在活动，刷新最后活动时间
-            if x != self._last_x or y != self._last_y:
+            if (x, y) != (self._last_x, self._last_y):
                 self._last_x, self._last_y = x, y
                 self._last_activity = time.monotonic()
 
@@ -487,101 +494,84 @@ class App:
             elif not in_zone and icons_visible():
                 # 图标显示中：仅当鼠标静止、无操作超过设定时间才隐藏
                 idle = min(time.monotonic() - self._last_activity, input_idle_seconds())
-                if any(user32.GetAsyncKeyState(key) & 0x8000 for key in (1, 2, 4)):
+                if any(key_down(key) for key in (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON)):
                     idle = 0
                 if idle >= int(self.delay_var.get()):
                     set_icons_visible(False)
 
         self.refresh_ui()
-        self.root.after(150, self.poll)
 
     def refresh_ui(self):
         vis = icons_visible()
-        if getattr(self, "_ui_state", "unset") == vis:
+        # 记住最近状态供下次启动恢复；启动恢复完成前不覆盖，否则会冲掉要恢复的目标
+        if vis is not None and not self._restoring and self.cfg.get('last_visible') != vis:
+            self.cfg['last_visible'] = vis
+            save_config(self.cfg)
+        if self._ui_state == vis:
             return
         self._ui_state = vis
-        if vis is not None and self.cfg.get("last_visible") != vis:
-            self.cfg["last_visible"]=vis
-            save_config(self.cfg)
         if vis is None:
-            self.state_label.config(text="无法获取桌面状态")
+            self.state_label.config(text='无法获取桌面状态')
             return
         if vis:
-            self.btn.config(text="立即隐藏", bg=BLUE, activebackground=BLUE_D)
-            self.state_label.config(text="桌面图标显示中")
+            self.btn.config(text='立即隐藏', bg=BLUE, activebackground=BLUE_D)
+            self.state_label.config(text='桌面图标显示中')
             self.dot_canvas.itemconfig(self.dot, fill=GREEN, outline=GREEN)
         else:
-            self.btn.config(text="立即显示", bg=GREEN, activebackground=GREEN_D)
-            self.state_label.config(text="桌面图标已隐藏 · 只剩壁纸")
+            self.btn.config(text='立即显示', bg=GREEN, activebackground=GREEN_D)
+            self.state_label.config(text='桌面图标已隐藏 · 只剩壁纸')
             self.dot_canvas.itemconfig(self.dot, fill=GRAY, outline=GRAY)
 
 
-def main():
-    k32 = kernel32
-    # 显式声明签名，避免 64 位句柄被截断
-    k32.CreateMutexW.restype = wintypes.HANDLE
-    k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
-                                 wintypes.LPCWSTR]
-    k32.CreateEventW.restype = wintypes.HANDLE
-    k32.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL,
-                                 wintypes.BOOL, wintypes.LPCWSTR]
-    k32.OpenEventW.restype = wintypes.HANDLE
-    k32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL,
-                               wintypes.LPCWSTR]
-    k32.SetEvent.argtypes = [wintypes.HANDLE]
-    k32.CloseHandle.argtypes = [wintypes.HANDLE]
-    k32.WaitForSingleObject.restype = wintypes.DWORD
-    k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+def _signal_running_instance(mutex):
+    """已有实例在运行：通知它显示设置窗口，然后本进程退出。"""
+    existing_event = None
+    for _ in range(20):
+        existing_event = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, EVENT_NAME)
+        if existing_event:
+            break
+        time.sleep(0.1)
+    kernel32.CloseHandle(mutex)
+    if not existing_event:
+        raise RuntimeError('净桌面已经运行，但未能唤出设置。请从托盘退出旧版本后重试。')
+    kernel32.SetEvent(existing_event)
+    kernel32.CloseHandle(existing_event)
 
-    # 若已有实例在运行，它的“唤起事件”应当存在
-    mutex = k32.CreateMutexW(None, False, MUTEX_NAME)
+
+def main():
+    mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-        existing_event = None
-        for _ in range(20):
-            existing_event = k32.OpenEventW(EVENT_MODIFY_STATE, False, EVENT_NAME)
-            if existing_event:
-                break
-            time.sleep(0.1)
-        # 第二个实例：通知主实例显示窗口，然后自己退出（不重复运行）
-        if existing_event:
-            k32.SetEvent(existing_event)
-            k32.CloseHandle(existing_event)
-        k32.CloseHandle(mutex)
-        if not existing_event:
-            raise RuntimeError("净桌面已经运行，但未能唤出设置。请从托盘退出旧版本后重试。")
+        _signal_running_instance(mutex)
         return
 
     # 主实例：创建自动复位的唤起事件（manualReset=False）
-    show_event = k32.CreateEventW(None, False, False, EVENT_NAME)
-
+    show_event = kernel32.CreateEventW(None, False, False, EVENT_NAME)
     if not show_event:
-        k32.CloseHandle(mutex)
-        raise ctypes.WinError(ctypes.get_last_error())
-
-    root = tk.Tk()
-    guard = desktop_recovery.start()
-    app = App(root, show_event)
-    app.recovery_guard = guard
-
-    root.update_idletasks()
-    w = max(root.winfo_reqwidth(), round(340*root.winfo_fpixels("1i")/96))
-    # 高度随内容自适应，确保所有选项都完整可见
-    h = root.winfo_reqheight() + 24
-    screen_h = root.winfo_screenheight()
-    if h > screen_h - 40:
-        h = screen_h - 40
-    x = (root.winfo_screenwidth() - w) // 2
-    y = (root.winfo_screenheight() - h) // 4
-    root.geometry(f"{w}x{h}+{x}+{y}")
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(mutex)
+        raise ctypes.WinError(error)
 
     try:
+        root = tk.Tk()
+        guard = desktop_recovery.start()
+        app = App(root, show_event)
+        app.recovery_guard = guard
+
+        root.update_idletasks()
+        w = max(root.winfo_reqwidth(), round(340 * root.winfo_fpixels('1i') / 96))
+        # 高度随内容自适应，确保所有选项都完整可见
+        screen_h = root.winfo_screenheight()
+        h = min(root.winfo_reqheight() + 24, screen_h - 40)
+        x = (root.winfo_screenwidth() - w) // 2
+        y = (screen_h - h) // 4
+        root.geometry(f'{w}x{h}+{x}+{y}')
         root.mainloop()
     finally:
-        k32.CloseHandle(show_event)
-        k32.CloseHandle(mutex)
+        kernel32.CloseHandle(show_event)
+        kernel32.CloseHandle(mutex)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

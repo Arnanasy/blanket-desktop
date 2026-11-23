@@ -1,17 +1,15 @@
+"""按鼠标所在点查询显示器边界（支持多显示器与任务栏工作区）。"""
 import ctypes
-from ctypes import wintypes
 
-u = ctypes.windll.user32
-class MonitorInfo(ctypes.Structure):
-    _fields_ = [('cbSize', wintypes.DWORD), ('monitor', wintypes.RECT), ('work', wintypes.RECT), ('flags', wintypes.DWORD)]
-u.MonitorFromPoint.argtypes = [wintypes.POINT, wintypes.DWORD]
-u.MonitorFromPoint.restype = wintypes.HANDLE
-u.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(MonitorInfo)]
+from win32 import user32, MONITORINFO, POINT, MONITOR_DEFAULTTONEAREST, SM_CXSCREEN, SM_CYSCREEN
+
 
 def bounds(x, y, work=False):
-    info = MonitorInfo(); info.cbSize = ctypes.sizeof(info)
-    if not u.GetMonitorInfoW(u.MonitorFromPoint(wintypes.POINT(x,y),2), ctypes.byref(info)):
-        return (0,0,u.GetSystemMetrics(0),u.GetSystemMetrics(1))
-    r = info.work if work else info.monitor
-    return r.left,r.top,r.right,r.bottom
-
+    """返回 (left, top, right, bottom)；work=True 时返回去掉任务栏的工作区。"""
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(info)
+    monitor = user32.MonitorFromPoint(POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST)
+    if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+        return 0, 0, user32.GetSystemMetrics(SM_CXSCREEN), user32.GetSystemMetrics(SM_CYSCREEN)
+    r = info.rcWork if work else info.rcMonitor
+    return r.left, r.top, r.right, r.bottom

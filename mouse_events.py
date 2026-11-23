@@ -1,37 +1,53 @@
-"""Dedicated hook thread: callback only queues events, never blocks on Explorer/Tk."""
+"""专用鼠标钩子线程：回调只把事件放进队列，绝不阻塞在资源管理器或 Tk 上。"""
 import ctypes
 from ctypes import wintypes
 import queue
 import threading
 import time
 
+from win32 import (user32, kernel32, HOOKPROC, MSLLHOOKSTRUCT, WH_MOUSE_LL,
+                   WM_LBUTTONDOWN, WM_LBUTTONUP, WM_QUIT)
+
+
 class MouseEvents:
     def __init__(self):
-        self.events=queue.SimpleQueue();self.thread_id=0;self.ready=threading.Event();self.hook=None
-        self.thread=threading.Thread(target=self.run,daemon=True);self.thread.start();self.ready.wait(1)
-    def run(self):
-        u=ctypes.WinDLL('user32',use_last_error=True);k=ctypes.WinDLL('kernel32',use_last_error=True)
-        cbtype=ctypes.WINFUNCTYPE(ctypes.c_ssize_t,ctypes.c_int,wintypes.WPARAM,wintypes.LPARAM)
-        class Data(ctypes.Structure):
-            _fields_=[('pt',wintypes.POINT),('mouseData',wintypes.DWORD),('flags',wintypes.DWORD),('time',wintypes.DWORD),('extra',ctypes.c_size_t)]
-        u.SetWindowsHookExW.argtypes=[ctypes.c_int,cbtype,wintypes.HINSTANCE,wintypes.DWORD];u.SetWindowsHookExW.restype=wintypes.HANDLE
-        u.CallNextHookEx.argtypes=[wintypes.HANDLE,ctypes.c_int,wintypes.WPARAM,wintypes.LPARAM];u.CallNextHookEx.restype=ctypes.c_ssize_t
-        u.UnhookWindowsHookEx.argtypes=[wintypes.HANDLE]
-        k.GetModuleHandleW.argtypes=[wintypes.LPCWSTR];k.GetModuleHandleW.restype=wintypes.HMODULE
-        def callback(code,msg,data):
-            if code>=0 and msg in (0x201,0x202):
-                p=ctypes.cast(data,ctypes.POINTER(Data)).contents.pt
-                self.events.put((time.monotonic(),msg,p.x,p.y))
-            return u.CallNextHookEx(None,code,msg,data)
-        self.callback=cbtype(callback)
-        self.thread_id=k.GetCurrentThreadId()
-        self.hook=u.SetWindowsHookExW(14,self.callback,k.GetModuleHandleW(None),0)
-        self.ready.set()
-        if not self.hook:return
-        msg=wintypes.MSG()
+        self.events = queue.SimpleQueue()
+        self.hook = None
+        self.thread_id = 0
+        self.last_down = 0.0          # 钩子最近一次收到左键按下的时刻，供健康检查使用
+        self._ready = threading.Event()
+        self._callback = HOOKPROC(self._on_event)   # 保持引用，防止被回收导致崩溃
+        self.thread = threading.Thread(target=self._run, name='mouse-hook', daemon=True)
+        self.thread.start()
+        self._ready.wait(1)
+
+    def _on_event(self, code, msg, data):
+        if code >= 0 and msg in (WM_LBUTTONDOWN, WM_LBUTTONUP):
+            now = time.monotonic()
+            point = ctypes.cast(data, ctypes.POINTER(MSLLHOOKSTRUCT)).contents.pt
+            if msg == WM_LBUTTONDOWN:
+                self.last_down = now
+            self.events.put((now, msg, point.x, point.y))
+        return user32.CallNextHookEx(None, code, msg, data)
+
+    def _run(self):
+        self.thread_id = kernel32.GetCurrentThreadId()
+        hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._callback, kernel32.GetModuleHandleW(None), 0)
+        self.hook = hook
+        self._ready.set()
+        if not hook:
+            return
+        msg = wintypes.MSG()
         try:
-            while u.GetMessageW(ctypes.byref(msg),None,0,0)>0:
-                u.TranslateMessage(ctypes.byref(msg));u.DispatchMessageW(ctypes.byref(msg))
-        finally:u.UnhookWindowsHookEx(self.hook)
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            user32.UnhookWindowsHookEx(hook)
+            self.hook = None          # 主线程据此自动退回轮询模式
+
     def close(self):
-        if self.thread_id:ctypes.windll.user32.PostThreadMessageW(self.thread_id,0x12,0,0)
+        """结束钩子线程并等待其卸载钩子。"""
+        if self.thread_id and self.thread.is_alive():
+            user32.PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0)
+            self.thread.join(1)
