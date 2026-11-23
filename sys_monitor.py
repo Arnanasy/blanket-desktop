@@ -366,7 +366,11 @@ class SystemMonitor:
             except tk.TclError:
                 self.fade = None
                 return
-            self.fade = self.win.after(20, brighten, step + 1) if step < 5 else None
+            if step < 5:
+                self.fade = self.win.after(20, brighten, step + 1)
+            else:
+                self.fade = None
+                self.raise_()
 
         if self.fade:
             self.win.after_cancel(self.fade)
@@ -406,6 +410,7 @@ class SystemMonitor:
             elif now - self.last_sample >= 1:
                 self.sample(now)
                 self.render()
-                # 周期性维持最顶层，防止被刚切到前台的游戏/全屏窗口盖住
+            if self.visible and self.cfg['over_fullscreen']:
+                # 每次主循环都维持最顶层（SetWindowPos 耗时 < 0.05ms），防止被游戏切前台盖住
                 self.raise_()
         return edge and self.cfg['edge'] == '右'

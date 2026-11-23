@@ -434,6 +434,7 @@ class App:
         try:
             self.root.withdraw()
             self.widgets.hide_all()
+            self.root.update_idletasks()
         except tk.TclError:
             pass
         self.tray.destroy()
@@ -444,11 +445,11 @@ class App:
         self.widgets.save()          # 会一并保存 self.cfg
         self.widgets.worker.shutdown(wait=False, cancel_futures=True)
         wtsapi32.WTSUnRegisterSessionNotification(self.tray.hwnd)
-        self.mouse_events.close()
-        # 退出前确保桌面图标恢复显示，避免用户找不到图标
-        if icons_visible() is False:
-            set_icons_visible(True)
-        if icons_visible() is True and self.recovery_guard:
+        self.mouse_events.close(timeout=0.05)
+        # 退出前确保桌面图标恢复显示（异步触发，不阻塞等待资源管理器重绘）
+        if state is False:
+            set_icons_visible(True, async_=True)
+        if (state is True or state is False) and self.recovery_guard:
             try:
                 self.recovery_guard.stdin.write(b'restored\n')
                 self.recovery_guard.stdin.close()

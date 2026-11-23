@@ -46,8 +46,8 @@ class MouseEvents:
             user32.UnhookWindowsHookEx(hook)
             self.hook = None          # 主线程据此自动退回轮询模式
 
-    def close(self):
-        """结束钩子线程并等待其卸载钩子。"""
+    def close(self, timeout=0.05):
+        """结束钩子线程并短暂等待其卸载钩子（避免退出时长时间阻塞）。"""
         if self.thread_id and self.thread.is_alive():
             user32.PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0)
-            self.thread.join(1)
+            self.thread.join(timeout)

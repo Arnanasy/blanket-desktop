@@ -94,6 +94,8 @@ NIF_MESSAGE = 0x1
 NIF_ICON = 0x2
 NIF_TIP = 0x4
 TPM_RIGHTBUTTON = 0x0002
+TPM_NONOTIFY = 0x0080
+TPM_RETURNCMD = 0x0100
 MF_STRING = 0x0000
 IMAGE_ICON = 1
 LR_LOADFROMFILE = 0x0010
@@ -177,6 +179,7 @@ _sig(user32.FindWindowW, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
 _sig(user32.FindWindowExW, HWND, HWND, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
 _sig(user32.EnumWindows, BOOL, WNDENUMPROC, wintypes.LPARAM)
 _sig(user32.ShowWindow, BOOL, HWND, INT)
+_sig(user32.ShowWindowAsync, BOOL, HWND, INT)
 _sig(user32.IsWindow, BOOL, HWND)
 _sig(user32.IsWindowVisible, BOOL, HWND)
 _sig(user32.GetSystemMetrics, INT, INT)

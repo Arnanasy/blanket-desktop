@@ -68,12 +68,16 @@ def icons_visible():
     return bool(user32.IsWindowVisible(lv))
 
 
-def set_icons_visible(show):
+def set_icons_visible(show, async_=False):
     """显示(True)/隐藏(False)桌面图标，成功返回 True。"""
     _shell, lv = find_desktop_windows()
     if not lv:
         return False
-    user32.ShowWindow(lv, SW_SHOW if show else SW_HIDE)
+    flag = SW_SHOW if show else SW_HIDE
+    if async_:
+        user32.ShowWindowAsync(lv, flag)
+    else:
+        user32.ShowWindow(lv, flag)
     return True
 
 

@@ -531,5 +531,5 @@ class Widgets:
         monitor_edge = self.monitor.tick(now, p.x, p.y, monitor, blocked, self.bar.enabled.get(),
                                          suppress_edge=theme_edge)
         bar_opened = self.bar.tick(now, p, monitor, blocked, monitor_edge, theme_edge)
-        if bar_opened or (self.monitor.visible and not monitor_was_visible):
+        if bar_opened:
             self.theme_button.raise_()
