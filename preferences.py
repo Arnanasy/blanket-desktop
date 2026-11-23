@@ -34,9 +34,14 @@ def _registered_command():
 
 
 def _script_of(command):
-    """从注册表命令行里取出被启动的脚本路径（第二个带引号的参数）。"""
-    parts = [p for p in command.split('"') if p.strip()]
-    return os.path.normcase(os.path.abspath(parts[-1])) if len(parts) >= 2 else ''
+    """从注册表命令行里取出被启动的脚本路径（兼容带引号与无引号格式）。"""
+    import shlex
+    try:
+        parts = shlex.split(command, posix=False)
+    except ValueError:
+        parts = command.split()
+    cleaned = [p.strip('"') for p in parts if p.strip('"')]
+    return os.path.normcase(os.path.abspath(cleaned[-1])) if len(cleaned) >= 2 else ''
 
 
 def autostart_enabled():
@@ -104,8 +109,8 @@ def load_config():
 
 
 def save_config(cfg):
-    """原子写入配置（先写临时文件再替换），失败静默。"""
-    temp = CONFIG_PATH + '.tmp'
+    """原子写入配置（按 PID 命名临时文件再替换，避免双进程并发冲突）。"""
+    temp = f'{CONFIG_PATH}.{os.getpid()}.tmp'
     try:
         with open(temp, 'w', encoding='utf-8') as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)

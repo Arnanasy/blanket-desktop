@@ -232,11 +232,13 @@ class App:
     def _tray_toggle(self):
         self.manual_toggle()
 
-    def _tray_open(self):
+    def open_settings(self):
         self._grace_until = time.monotonic() + 5
         self.root.deiconify()
         self.root.lift()
         self._last_activity = time.monotonic()
+
+    _tray_open = open_settings
 
     def _blank_click(self):
         """点桌面空白处：切换图标显示/隐藏。"""
@@ -369,9 +371,7 @@ class App:
     def resume_desktop(self):
         """睡眠唤醒、解锁、显示器变化或资源管理器重启后，重新定位桌面窗口并刷新挂件。"""
         invalidate_cache()
-        self.widgets.last_theme = 0
-        self.widgets.last_position_check = 0
-        self.widgets.last_clock = ''
+        self.widgets.reset_refresh()
         self.refresh_ui()
 
     def quit_app(self):

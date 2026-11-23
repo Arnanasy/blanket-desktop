@@ -25,7 +25,8 @@ try {
 def read_json(url):
     req = Request(url, headers={'User-Agent': 'JingZhuoMian-Weather/1.0'})
     with urlopen(req, timeout=8) as response:
-        return json.load(response)
+        raw = response.read(200000)
+        return json.loads(raw.decode('utf-8-sig'))
 
 
 def coords(lat, lon):

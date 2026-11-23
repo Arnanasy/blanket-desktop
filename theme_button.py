@@ -98,7 +98,7 @@ class ThemeButton:
 
     # ------------------------------------------------------------ 位置与动画
     def _move(self, extra=0):
-        user32.SetWindowPos(self.hwnd, HWND_TOPMOST, int(self.cur_x), int(self.cur_y),
+        user32.SetWindowPos(self.hwnd, HWND_TOPMOST, round(self.cur_x), round(self.cur_y),
                             self.size, self.size, SWP_NOSIZE | SWP_NOACTIVATE | extra)
 
     def _edges(self):

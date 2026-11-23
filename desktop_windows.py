@@ -111,6 +111,10 @@ def in_hotzone(x, y, mode):
 
 
 # ---------------------------------------------------------------- 辅助功能判定
+_RELEASE_FN = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_GET_ROLE_FN = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, VARIANT, ctypes.POINTER(VARIANT))
+
+
 def accessible_blank(point):
     """用 MSAA 判断坐标下的对象是否为列表背景；无法判断时返回 None。"""
     status = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
@@ -131,14 +135,13 @@ def _accessible_list_background(point):
         return None
     # IAccessible 虚表：[2] Release，[13] get_accRole
     table = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
-    release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(table[2])
-    get_role = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, VARIANT,
-                                  ctypes.POINTER(VARIANT))(table[13])
+    release = _RELEASE_FN(table[2])
+    get_role = _GET_ROLE_FN(table[13])
     try:
         if get_role(obj, child, ctypes.byref(role)) != S_OK or role.vt != VT_I4:
             return None
-        # 只有列表背景才算空白；列表项和未知角色一律不切换
-        return role.payload[0] == ROLE_SYSTEM_LIST
+        # VT_I4 仅低 32 位有效；只有列表背景才算空白，列表项和未知角色一律不切换
+        return ((role.payload[0] or 0) & 0xFFFFFFFF) == ROLE_SYSTEM_LIST
     finally:
         oleaut32.VariantClear(ctypes.byref(role))
         oleaut32.VariantClear(ctypes.byref(child))
@@ -146,7 +149,7 @@ def _accessible_list_background(point):
 
 
 class DesktopClick:
-    """共享的落点检测；仅在鼠标钩子不可用时通过 check() 轮询左键。"""
+    """基于轻量化左键轮询的桌面空白点击检测（不挂全局鼠标钩子，零鼠标延迟）。"""
 
     DRAG_THRESHOLD = 6   # 按下到松开位移超过此值视为框选，不触发
 
@@ -177,11 +180,6 @@ class DesktopClick:
                 return self.is_blank_click(x, y)
         return False
 
-    def over_desktop(self, x, y):
-        """坐标下的窗口是否属于桌面图标层（不做 MSAA 判定，开销很小）。"""
-        hwnd = user32.WindowFromPoint(POINT(x, y))
-        return bool(hwnd) and hwnd in find_desktop_windows()
-
     def is_blank_click(self, x, y):
         hwnd = user32.WindowFromPoint(POINT(x, y))
         shell, lv = find_desktop_windows()
@@ -195,6 +193,3 @@ class DesktopClick:
                     self.on_unavailable()
             return result is True
         return False
-
-    # 兼容旧调用名
-    _is_blank_click = is_blank_click

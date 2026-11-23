@@ -60,6 +60,8 @@ class Widgets:
         self.control_vars = {}
         self.settings_window = None
         self.preview = None
+        self._last_alpha = None
+        self._font_choices = None
 
         # 天气
         self.weather_on = tk.BooleanVar(value=self.cfg.get('weather_enabled', True))
@@ -205,7 +207,10 @@ class Widgets:
         palette = self.palettes.get(self.palette) if self.adaptive.get() else None
         self.face.draw(canvas or self.clock_label, self.style, self.accent, palette, weather)
         if canvas is None:
-            self.clock.attributes('-alpha', self.style['opacity'] / 100)
+            alpha = self.style['opacity'] / 100
+            if alpha != self._last_alpha:
+                self._last_alpha = alpha
+                self.clock.attributes('-alpha', alpha)
 
     # ------------------------------------------------------------ 壁纸取色
     def sample_wallpaper(self):
@@ -250,7 +255,10 @@ class Widgets:
             return
         details = self.weather_status
         if self.weather:
-            stamp = time.strftime('%m-%d %H:%M', time.localtime(self.weather['updated']))
+            try:
+                stamp = time.strftime('%m-%d %H:%M', time.localtime(self.weather['updated']))
+            except (OSError, OverflowError, ValueError, TypeError):
+                stamp = '未知时间'
             details = f"{self.weather.get('place', '')} · {stamp} 更新 · {details}"
         self.weather_tip = tk.Toplevel(self.clock)
         self.weather_tip.withdraw()
@@ -343,10 +351,11 @@ class Widgets:
             tk.Scale(row(label), from_=lo, to=hi, orient='horizontal', variable=var, command=apply,
                      showvalue=True, length=340).pack(side='left', fill='x', expand=True)
 
-        all_families = sorted(set(tkfont.families()))
-        preferred = ['Bahnschrift', 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei UI', 'Consolas', 'Arial']
-        font_choices = [f for f in preferred if f in all_families] + [f for f in all_families if f not in preferred]
-        for key, label, values in [('font', '字体', font_choices),
+        if self._font_choices is None:
+            all_families = sorted(set(tkfont.families()))
+            preferred = ['Bahnschrift', 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei UI', 'Consolas', 'Arial']
+            self._font_choices = [f for f in preferred if f in all_families] + [f for f in all_families if f not in preferred]
+        for key, label, values in [('font', '字体', self._font_choices),
                                    ('shape', '形状', ['透明', '矩形卡片', '圆角卡片', '圆形']),
                                    ('layout', '排列', ['上下排列', '左右排列'])]:
             var = variables[key] = tk.StringVar(value=self.style[key])
@@ -446,9 +455,10 @@ class Widgets:
 
     def _show_clock(self):
         x, y = self._saved_position()
-        l, t, r, b = bounds(x, y, work=True)
-        x = max(l, min(x, r - self.clock.winfo_reqwidth()))
-        y = max(t, min(y, b - self.clock.winfo_reqheight()))
+        width, height = self.clock.winfo_reqwidth(), self.clock.winfo_reqheight()
+        l, t, r, b = bounds(x + width // 2, y + height // 2, work=True)
+        x = max(l, min(x, r - width))
+        y = max(t, min(y, b - height))
         self.clock.geometry(f'{x:+d}{y:+d}')
         # 原生 SW_SHOWNOACTIVATE 显示：不抢前台焦点；Tk 的映射状态会随之同步（已验证）
         user32.ShowWindow(self.clock_hwnd, SW_SHOWNOACTIVATE)
@@ -482,6 +492,12 @@ class Widgets:
         dark = self.theme_button.refresh()
         self.bar.set_theme_label(dark)
         self.app.sync_theme(dark)
+
+    def reset_refresh(self):
+        """系统恢复或显示器变化后，触发下一帧立刻刷新主题、位置和时钟。"""
+        self.last_theme = 0
+        self.last_position_check = 0
+        self.last_clock = ''
 
     # ------------------------------------------------------------ 主循环
     def tick(self):
@@ -527,9 +543,8 @@ class Widgets:
 
         theme_edge = self.theme_button.tick(now, p, blocked, icons)
         monitor = bounds(p.x, p.y)
-        monitor_was_visible = self.monitor.visible
         monitor_edge = self.monitor.tick(now, p.x, p.y, monitor, blocked, self.bar.enabled.get(),
-                                         suppress_edge=theme_edge)
+                                         suppress_edge=theme_edge, foreground=foreground)
         bar_opened = self.bar.tick(now, p, monitor, blocked, monitor_edge, theme_edge)
         if bar_opened:
             self.theme_button.raise_()

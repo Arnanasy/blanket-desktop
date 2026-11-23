@@ -55,15 +55,11 @@ VK_MENU = 0x12                       # Alt
 VK_H = 0x48
 VK_T = 0x54
 KEY_DOWN = 0x8000
-WH_MOUSE_LL = 14
 
 # 消息
 WM_NULL = 0x0000
-WM_QUIT = 0x0012
 WM_SETTINGCHANGE = 0x001A
 WM_DISPLAYCHANGE = 0x007E
-WM_COMMAND = 0x0111
-WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
 WM_POWERBROADCAST = 0x0218
@@ -128,11 +124,6 @@ class LASTINPUTINFO(ctypes.Structure):
     _fields_ = [('cbSize', wintypes.UINT), ('dwTime', wintypes.DWORD)]
 
 
-class MSLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [('pt', POINT), ('mouseData', wintypes.DWORD), ('flags', wintypes.DWORD),
-                ('time', wintypes.DWORD), ('dwExtraInfo', ctypes.c_size_t)]
-
-
 class NOTIFYICONDATAW(ctypes.Structure):
     _fields_ = [
         ('cbSize', wintypes.DWORD), ('hWnd', wintypes.HWND), ('uID', wintypes.UINT),
@@ -158,7 +149,6 @@ class VARIANT(ctypes.Structure):
 # ---------------------------------------------------------------- 回调类型
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
-HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
 
 
 def _sig(func, restype, *argtypes):
@@ -209,14 +199,7 @@ _sig(user32.GetMonitorInfoW, BOOL, H, ctypes.POINTER(MONITORINFO))
 _sig(user32.SendMessageTimeoutW, LRESULT, HWND, UINT, wintypes.WPARAM, wintypes.LPCWSTR,
      UINT, UINT, ctypes.POINTER(ctypes.c_size_t))
 _sig(user32.MessageBoxW, INT, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, UINT)
-_sig(user32.SetWindowsHookExW, H, INT, HOOKPROC, wintypes.HINSTANCE, DWORD)
-_sig(user32.CallNextHookEx, LRESULT, H, INT, wintypes.WPARAM, wintypes.LPARAM)
-_sig(user32.UnhookWindowsHookEx, BOOL, H)
-_sig(user32.GetMessageW, BOOL, ctypes.POINTER(wintypes.MSG), HWND, UINT, UINT)
-_sig(user32.TranslateMessage, BOOL, ctypes.POINTER(wintypes.MSG))
-_sig(user32.DispatchMessageW, LRESULT, ctypes.POINTER(wintypes.MSG))
 _sig(user32.PostMessageW, BOOL, HWND, UINT, wintypes.WPARAM, wintypes.LPARAM)
-_sig(user32.PostThreadMessageW, BOOL, DWORD, UINT, wintypes.WPARAM, wintypes.LPARAM)
 
 try:
     GetWindowLongPtr = _sig(user32.GetWindowLongPtrW, LONG_PTR, HWND, INT)
@@ -234,8 +217,6 @@ _sig(kernel32.SetEvent, BOOL, H)
 _sig(kernel32.CloseHandle, BOOL, H)
 _sig(kernel32.WaitForSingleObject, DWORD, H, DWORD)
 _sig(kernel32.GetTickCount, DWORD)
-_sig(kernel32.GetCurrentThreadId, DWORD)
-_sig(kernel32.GetModuleHandleW, wintypes.HMODULE, wintypes.LPCWSTR)
 _sig(kernel32.GetStdHandle, H, DWORD)
 
 # ---------------------------------------------------------------- gdi32

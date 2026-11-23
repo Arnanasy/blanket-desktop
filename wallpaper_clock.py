@@ -1,46 +1,56 @@
-"""Sample the system wallpaper using physical monitor coordinates."""
+"""按物理显示器坐标采样系统壁纸亮度，返回 'dark' / 'light' 或 None。"""
 import os
-import winreg
 from pathlib import Path
+import winreg
+
 
 def sample(rect, monitor, virtual):
     try:
         from PIL import Image, ImageStat
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop") as key:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Control Panel\Desktop') as key:
             def value(name, default):
                 try:
                     return winreg.QueryValueEx(key, name)[0]
                 except OSError:
                     return default
-            style = str(value("WallpaperStyle", "10"))
-            tiled = str(value("TileWallpaper", "0")) == "1"
-            paths = [Path(os.environ["APPDATA"]) / "Microsoft/Windows/Themes/TranscodedWallpaper",
-                     Path(value("Wallpaper", ""))]
+
+            style = str(value('WallpaperStyle', '10'))
+            tiled = str(value('TileWallpaper', '0')) == '1'
+            paths = [
+                Path(os.environ.get('APPDATA', '')) / 'Microsoft/Windows/Themes/TranscodedWallpaper',
+                Path(value('Wallpaper', '')),
+            ]
         if tiled:
             return None
         for path in paths:
+            if not path or not path.is_file():
+                continue
             try:
                 with Image.open(path) as img:
-                    left, top, right, bottom = virtual if style == "22" else monitor
-                    mw, mh = right-left, bottom-top
+                    left, top, right, bottom = virtual if style == '22' else monitor
+                    mw, mh = right - left, bottom - top
                     iw, ih = img.size
-                    sx, sy = mw/iw, mh/ih
-                    if style in ("10", "22"):
+                    if iw <= 0 or ih <= 0 or mw <= 0 or mh <= 0:
+                        continue
+                    sx, sy = mw / iw, mh / ih
+                    if style in ('10', '22'):
                         sx = sy = max(sx, sy)
-                    elif style == "6":
+                    elif style == '6':
                         sx = sy = min(sx, sy)
-                    elif style != "2":
+                    elif style != '2':
                         sx = sy = 1
-                    ox, oy = left+(mw-iw*sx)/2, top+(mh-ih*sy)/2
-                    x,y,w,h = rect
-                    box = ((x-ox)/sx,(y-oy)/sy,(x+w-ox)/sx,(y+h-oy)/sy)
-                    if box[0]<-0.5 or box[1]<-0.5 or box[2]>iw+0.5 or box[3]>ih+0.5:
+                    ox, oy = left + (mw - iw * sx) / 2, top + (mh - ih * sy) / 2
+                    x, y, w, h = rect
+                    box = ((x - ox) / sx, (y - oy) / sy, (x + w - ox) / sx, (y + h - oy) / sy)
+                    if box[0] < -0.5 or box[1] < -0.5 or box[2] > iw + 0.5 or box[3] > ih + 0.5:
                         return None
-                    box=(max(0,box[0]),max(0,box[1]),min(iw,box[2]),min(ih,box[3]))
-                    patch = img.convert("RGB").resize((32,32), Image.Resampling.BOX,box=box)
-                    return "dark" if ImageStat.Stat(patch.convert("L")).mean[0]<145 else "light"
-            except (ValueError,OSError):
+                    box = (max(0, box[0]), max(0, box[1]), min(iw, box[2]), min(ih, box[3]))
+                    if box[2] <= box[0] or box[3] <= box[1]:
+                        return None
+                    patch = img.convert('RGB').resize((32, 32), Image.Resampling.BOX, box=box)
+                    return 'dark' if ImageStat.Stat(patch.convert('L')).mean[0] < 145 else 'light'
+            except (ValueError, OSError, ZeroDivisionError):
                 continue
-    except (ImportError,OSError,KeyError,ValueError):
+    except (ImportError, OSError, KeyError, ValueError, ZeroDivisionError):
         pass
     return None

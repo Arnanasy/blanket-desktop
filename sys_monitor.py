@@ -48,6 +48,12 @@ _ip.FreeMibTable.argtypes = [c.c_void_p]
 _ip.FreeMibTable.restype = None
 
 
+# MIB_IF_ROW2 物理网卡类型：以太网(6)、Wi-Fi(71)、WWAN(243/244)
+PHYSICAL_IF_TYPES = (6, 71, 243, 244)
+VALID_EDGES = ('左', '右')
+VALID_SHAPES = ('圆角', '方形', '透明')
+
+
 def network():
     table = c.POINTER(InterfaceTable)()
     if _ip.GetIfTable2(c.byref(table)):
@@ -57,7 +63,7 @@ def network():
         return {
             row.luid: (row.received, row.sent)
             for row in rows
-            if (row.flags & 1) and row.oper == 1 and row.kind in (6, 71, 243, 244)
+            if (row.flags & 1) and row.oper == 1 and row.kind in PHYSICAL_IF_TYPES
         }
     finally:
         _ip.FreeMibTable(table)
@@ -139,6 +145,10 @@ class SystemMonitor:
                 self.cfg['position'] = pos
         self.cfg['size'] = max(9, min(48, self.cfg['size']))
         self.cfg['alpha'] = max(30, min(100, self.cfg['alpha']))
+        if self.cfg['edge'] not in VALID_EDGES:
+            self.cfg['edge'] = self.defaults['edge']
+        if self.cfg['shape'] not in VALID_SHAPES:
+            self.cfg['shape'] = self.defaults['shape']
 
         self.win = tk.Toplevel(widgets.root)
         self.win.withdraw()
@@ -169,6 +179,7 @@ class SystemMonitor:
         self.edge_monitor = None
         self.last_inside = 0.0
         self.last_sample = 0.0
+        self._last_foreground = None
         self.fade = None
         self.sampler = Sampler()
         self.text = ''
@@ -194,7 +205,7 @@ class SystemMonitor:
         cv.configure(width=width, height=height)
         cv.delete('all')
         if cfg['shape'] == '圆角':
-            r = 10
+            r = min(10, width // 3, height // 3)
             cv.create_polygon(
                 r, 0, width - r, 0, width, 0, width, r, width, height - r, width, height,
                 width - r, height, r, height, 0, height, 0, height - r, 0, r, 0, 0,
@@ -376,7 +387,7 @@ class SystemMonitor:
             self.win.after_cancel(self.fade)
         brighten(1)
 
-    def tick(self, now, x, y, monitor, blocked, bar_enabled, suppress_edge=False):
+    def tick(self, now, x, y, monitor, blocked, bar_enabled, suppress_edge=False, foreground=None):
         l, t, r, b = monitor
         hide_blocked = blocked and not self.cfg['over_fullscreen']
         edge = not suppress_edge and (
@@ -394,6 +405,7 @@ class SystemMonitor:
             self.cfg['pinned'] or (self.edge_start is not None and now - self.edge_start >= 0.25)
         ):
             self.show(x, y, now)
+            self._last_foreground = foreground
 
         if self.visible:
             wx, wy = self.win.winfo_x(), self.win.winfo_y()
@@ -407,10 +419,14 @@ class SystemMonitor:
                     self.fade = None
                 self.win.withdraw()
                 self.visible = False
+                # 隐藏后清空旧采样基准，避免重新出现时第一帧算出整段隐藏期的平均假值
+                self.sampler.cpu = None
+                self.sampler.net = None
             elif now - self.last_sample >= 1:
                 self.sample(now)
                 self.render()
-            if self.visible and self.cfg['over_fullscreen']:
-                # 每次主循环都维持最顶层（SetWindowPos 耗时 < 0.05ms），防止被游戏切前台盖住
+            if self.visible and self.cfg['over_fullscreen'] and foreground != self._last_foreground:
+                # 仅在前台窗口切换时重新置顶，避免每 150ms 无谓触碰 DWM 合成树
+                self._last_foreground = foreground
                 self.raise_()
         return edge and self.cfg['edge'] == '右'

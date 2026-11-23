@@ -55,7 +55,7 @@ class LauncherBar:
     def render(self):
         for child in self.win.winfo_children():
             child.destroy()
-        self._button('净桌面 · 快捷分组', self.app._tray_open)
+        self._button('净桌面 · 快捷分组', self.app.open_settings)
         if self.recent:
             tk.Label(self.win, text='最近启动', bg=BAR_BG, fg='white').pack(anchor='w', padx=14)
             for path in self.recent:
@@ -111,6 +111,9 @@ class LauncherBar:
             self.render()
 
     def open(self, path):
+        if not os.path.exists(path):
+            messagebox.showerror('无法打开', f'路径不存在：{path}', parent=self.win)
+            return
         try:
             os.startfile(path)
         except OSError as e:

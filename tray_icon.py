@@ -4,7 +4,7 @@ from pathlib import Path
 import queue
 
 from win32 import (user32, gdi32, shell32, NOTIFYICONDATAW, ICONINFO, WNDPROC, SetWindowLongPtr,
-                   GWLP_WNDPROC, WM_NULL, WM_APP, WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP, WM_DISPLAYCHANGE,
+                   GWLP_WNDPROC, WM_NULL, WM_APP, WM_LBUTTONUP, WM_RBUTTONUP, WM_DISPLAYCHANGE,
                    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, PBT_APMRESUMESUSPEND,
                    PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK, NIM_ADD, NIM_DELETE, NIF_MESSAGE,
                    NIF_ICON, NIF_TIP, TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, MF_STRING,
@@ -139,12 +139,6 @@ class TrayIcon:
                 self._show_menu()
             elif event == 'resume':
                 self.on_resume()
-            elif event == 'open':
-                self._on_open()
-            elif event == 'theme' and self.on_theme:
-                self.on_theme()
-            elif event == 'quit':
-                self._on_quit()
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         resumed = ((msg == WM_WTSSESSION_CHANGE and wparam == WTS_SESSION_UNLOCK)
@@ -164,17 +158,6 @@ class TrayIcon:
                 return 0
             if mouse == WM_RBUTTONUP:
                 self._events.put('right')
-                return 0
-        elif msg == WM_COMMAND:
-            cmd = wparam & 0xFFFF
-            if cmd == IDM_OPEN:
-                self._events.put('open')
-                return 0
-            if cmd == IDM_THEME and self.on_theme:
-                self._events.put('theme')
-                return 0
-            if cmd == IDM_QUIT:
-                self._events.put('quit')
                 return 0
         return user32.CallWindowProcW(self._old_proc, hwnd, msg, wparam, lparam)
 
