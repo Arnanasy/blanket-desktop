@@ -342,7 +342,7 @@ class Widgets:
         ttk.Checkbutton(switches,text='当地天气',variable=self.weather_on,command=self.toggle_weather).pack(side='left')
         ttk.Checkbutton(switches,text='图标隐藏时显示时钟',variable=self.clock_on,command=self.save).pack(side='left')
         ttk.Checkbutton(switches,text='启用右侧启动栏',variable=self.bar_on,command=self.save).pack(side='left')
-        ttk.Checkbutton(switches,text='主题按钮常显',variable=self.theme_btn_always,command=self.save).pack(side='left')
+        ttk.Checkbutton(switches,text='主题按钮始终置顶',variable=self.theme_btn_always,command=self.save).pack(side='left')
         ttk.Label(pane,text='图标隐藏时才显示时钟 · 可直接拖动 · 双击时钟或点 ☀/☾ 按钮一键切换深浅主题（右键设置）').pack(anchor='w',pady=(10,4))
         frame=ttk.Frame(pane);frame.pack(fill='both',expand=True)
         viewport=tk.Canvas(frame,bg='#334155',highlightthickness=0);viewport.grid(row=0,column=0,sticky='nsew')
@@ -596,13 +596,14 @@ class Widgets:
         elif visible:self.clock.withdraw()
 
         theme_edge = False
-        if (self.theme_btn_always.get() or self.app.desktop_icons_visible() is False) and not blocked:
+        theme_blocked = blocked and not self.theme_btn_always.get()
+        if (self.theme_btn_always.get() or self.app.desktop_icons_visible() is False) and not theme_blocked:
             if not self.theme_btn.winfo_viewable():
                 self.theme_btn.deiconify()
                 self.place_theme_button()
                 u.SetWindowPos(self.theme_hwnd, -1, int(self.theme_cur_x), int(self.theme_cur_y),
                                self.theme_size, self.theme_size, 0x0010 | 0x0040)
-            theme_edge = self._theme_tick(now, p, blocked)
+            theme_edge = self._theme_tick(now, p, theme_blocked)
         elif self.theme_btn.winfo_viewable():
             self.theme_btn.withdraw()
 
@@ -610,6 +611,7 @@ class Widgets:
             self.place_clock(self.clock.winfo_x(),self.clock.winfo_y())
             self.last_position_check=now
         l,t,r,b=bounds(p.x,p.y)
+        monitor_was_visible = self.monitor.visible
         monitor_edge = self.monitor.tick(now, p.x, p.y, (l,t,r,b), blocked, self.bar_on.get(), suppress_edge=theme_edge)
         edge=self.bar_on.get() and p.x>=r-3 and not blocked and not monitor_edge and not theme_edge
         monitor=(l,t,r,b)
@@ -617,11 +619,17 @@ class Widgets:
             self.edge_since=None
         elif self.edge_since is None or self.edge_monitor!=monitor:
             self.edge_since=now;self.edge_monitor=monitor
+        bar_opened = False
         if edge and self.edge_since is not None and now-self.edge_since>=0.35:
             wl,wt,wr,wb=bounds(p.x,p.y,work=True)
             bar_width=max(self.bar.winfo_reqwidth(),round(260*self.ui_scale))
             self.bar.geometry(f'{bar_width}x{min(self.bar.winfo_reqheight(),wb-wt)}+{wr-bar_width}+{wt+max(0,(wb-wt-min(self.bar.winfo_reqheight(),wb-wt))//2)}')
-            self.bar.deiconify();self.last_inside=now
+            if not self.bar.winfo_viewable():
+                self.bar.deiconify()
+                bar_opened = True
+            self.last_inside=now
+        if (bar_opened or (self.monitor.visible and not monitor_was_visible)) and self.theme_btn.winfo_viewable():
+            u.SetWindowPos(self.theme_hwnd, -1, 0, 0, 0, 0, 0x13)  # Keep position, size and focus.
         if self.bar.winfo_viewable():
             inside=self.bar.winfo_x()<=p.x<self.bar.winfo_x()+self.bar.winfo_width() and self.bar.winfo_y()<=p.y<self.bar.winfo_y()+self.bar.winfo_height()
             if inside:self.last_inside=now
