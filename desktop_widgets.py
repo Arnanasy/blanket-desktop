@@ -242,10 +242,18 @@ class Widgets:
             stamp = time.strftime('%m-%d %H:%M', time.localtime(self.weather['updated']))
             details = f"{self.weather.get('place', '')} · {stamp} 更新 · {details}"
         self.weather_tip = tk.Toplevel(self.clock)
+        self.weather_tip.withdraw()
         self.weather_tip.overrideredirect(True)
-        self.weather_tip.geometry(f'+{event.x_root + 15}+{event.y_root + 20}')
+        self.weather_tip.attributes('-topmost', True)
         tk.Label(self.weather_tip, text=details + ' · ' + self.weather.get('source', 'Open-Meteo'),
                  padx=5, pady=2).pack()
+        self.weather_tip.update_idletasks()
+        tw, th = self.weather_tip.winfo_reqwidth(), self.weather_tip.winfo_reqheight()
+        l, t, r, b = bounds(event.x_root, event.y_root, work=True)
+        tx = max(l, min(event.x_root + 15, r - tw - 4))
+        ty = max(t, min(event.y_root + 20, b - th - 4))
+        self.weather_tip.geometry(f'+{tx}+{ty}')
+        self.weather_tip.deiconify()
         self.weather_tip.after(2200, self.hide_weather_tip)
 
     def update_weather(self, now):
@@ -392,8 +400,9 @@ class Widgets:
         return list(DEFAULT_POSITION)
 
     def place_clock(self, x, y, snap=False):
-        l, t, r, b = bounds(x, y, work=True)
         width, height = self.clock.winfo_reqwidth(), self.clock.winfo_reqheight()
+        # 用窗口中心点查询所在显示器，避免多屏向右拖动时被主屏右边界卡住
+        l, t, r, b = bounds(x + width // 2, y + height // 2, work=True)
         x = max(l, min(x, r - width))
         y = max(t, min(y, b - height))
         if snap:
@@ -459,7 +468,9 @@ class Widgets:
         self.refresh_theme_button()
 
     def refresh_theme_button(self):
-        self.bar.set_theme_label(self.theme_button.refresh())
+        dark = self.theme_button.refresh()
+        self.bar.set_theme_label(dark)
+        self.app.sync_theme(dark)
 
     # ------------------------------------------------------------ 主循环
     def tick(self):

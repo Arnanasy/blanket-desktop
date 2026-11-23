@@ -199,9 +199,11 @@ class SystemMonitor:
         cv.create_text(16, 12, anchor='nw', font=self.font, fill=cfg['fg'], text=self.text or '—')
 
     def place(self, x, y):
-        l, t, r, b = self.bounds(x, y, work=True)
-        x = max(l, min(x, r - self.canvas.winfo_reqwidth()))
-        y = max(t, min(y, b - self.canvas.winfo_reqheight()))
+        w, h = self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight()
+        # 用窗口中心点查询显示器边界，避免多屏向右拖动时被主屏右边缘卡住
+        l, t, r, b = self.bounds(x + w // 2, y + h // 2, work=True)
+        x = max(l, min(x, r - w))
+        y = max(t, min(y, b - h))
         self.win.geometry(f'+{x}+{y}')
         return [x, y]
 
@@ -260,16 +262,25 @@ class SystemMonitor:
 
         def finish(accept):
             if accept:
+                old_edge = committed.get('edge')
                 for key, var in variables.items():
                     self.cfg[key] = var.get()
                 if not any(self.cfg[key] for key in ('cpu', 'memory', 'net')):
                     self.cfg['cpu'] = True
+                if self.cfg.get('edge') != old_edge:
+                    # 切换呼出边缘后清除旧的固定坐标，避免下次仍弹在原来的另一侧
+                    self.cfg.pop('position', None)
+                    committed.pop('position', None)
                 committed.update(self.cfg)
             self.cfg = committed
             self.dialog = None
             self.controls = {}
             d.destroy()
             self.apply()
+            if accept and self.visible and 'position' not in self.cfg:
+                l, t, r, b = self.bounds(self.win.winfo_x(), self.win.winfo_y(), work=True)
+                nx = l + 5 if self.cfg['edge'] == '左' else r - self.canvas.winfo_reqwidth() - 5
+                self.place(nx, self.win.winfo_y())
             if accept:
                 if self.save_timer is not None:
                     self.win.after_cancel(self.save_timer)

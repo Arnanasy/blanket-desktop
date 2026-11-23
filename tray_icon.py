@@ -4,7 +4,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 from win32 import (user32, gdi32, shell32, NOTIFYICONDATAW, ICONINFO, WNDPROC, SetWindowLongPtr,
-                   GWLP_WNDPROC, WM_APP, WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP, WM_DISPLAYCHANGE,
+                   GWLP_WNDPROC, WM_NULL, WM_APP, WM_COMMAND, WM_LBUTTONUP, WM_RBUTTONUP, WM_DISPLAYCHANGE,
                    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, PBT_APMRESUMESUSPEND,
                    PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK, NIM_ADD, NIM_DELETE, NIF_MESSAGE,
                    NIF_ICON, NIF_TIP, TPM_RIGHTBUTTON, MF_STRING, IMAGE_ICON, LR_LOADFROMFILE,
@@ -110,6 +110,8 @@ class TrayIcon:
         user32.SetForegroundWindow(self.hwnd)   # 托盘菜单必需，否则点别处菜单不消失
         try:
             user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, self.hwnd, None)
+            # 微软文档建议：TrackPopupMenu 返回后投递 WM_NULL，避免下次右键失灵
+            user32.PostMessageW(self.hwnd, WM_NULL, 0, 0)
         finally:
             user32.DestroyMenu(menu)
             self.menu_closed()

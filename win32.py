@@ -58,6 +58,7 @@ KEY_DOWN = 0x8000
 WH_MOUSE_LL = 14
 
 # 消息
+WM_NULL = 0x0000
 WM_QUIT = 0x0012
 WM_SETTINGCHANGE = 0x001A
 WM_DISPLAYCHANGE = 0x007E
@@ -211,6 +212,7 @@ _sig(user32.UnhookWindowsHookEx, BOOL, H)
 _sig(user32.GetMessageW, BOOL, ctypes.POINTER(wintypes.MSG), HWND, UINT, UINT)
 _sig(user32.TranslateMessage, BOOL, ctypes.POINTER(wintypes.MSG))
 _sig(user32.DispatchMessageW, LRESULT, ctypes.POINTER(wintypes.MSG))
+_sig(user32.PostMessageW, BOOL, HWND, UINT, wintypes.WPARAM, wintypes.LPARAM)
 _sig(user32.PostThreadMessageW, BOOL, DWORD, UINT, wintypes.WPARAM, wintypes.LPARAM)
 
 try:

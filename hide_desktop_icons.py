@@ -80,6 +80,7 @@ class App:
         self._restore_target = self.cfg.get('last_visible')
         self._restoring = True
         self._ui_state = 'unset'
+        self._dark = None
         self._quitting = False
         self.recovery_guard = None
         root.title('净桌面')
@@ -211,7 +212,7 @@ class App:
 
         self._persist()
         self.refresh_ui()
-        self._restyle(_system_dark())
+        self.sync_theme(_system_dark())
         self.root.after(POLL_MS, self.poll)
         self.root.after(10, self.poll_mouse)
 
@@ -312,6 +313,15 @@ class App:
     def _update_theme_label(self, dark):
         self.theme_button.config(text='☀ 切换为浅色主题' if dark else '☾ 切换为深色主题')
 
+    def sync_theme(self, dark):
+        """当外部或程序内切换了系统深浅色时，同步更新主窗口配色与按钮文字。"""
+        dark = bool(dark)
+        if dark == self._dark:
+            return
+        self._dark = dark
+        self._restyle(dark)
+        self._update_theme_label(dark)
+
     def toggle_theme(self):
         """一键切换 Windows 深色/浅色主题，应用和浏览器同时生效。"""
         try:
@@ -321,8 +331,7 @@ class App:
             from tkinter import messagebox
             messagebox.showerror('主题切换失败', str(error), parent=self.root)
             return
-        self._restyle(dark)
-        self._update_theme_label(dark)
+        self.sync_theme(dark)
         self.widgets.theme()               # 刷新时钟配色与主题按钮
 
     def _restyle(self, dark):
