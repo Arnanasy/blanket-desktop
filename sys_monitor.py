@@ -1,6 +1,8 @@
 """按需呼出的 Windows 系统性能监控挂件（无常驻轮询线程，按启用项采集）。"""
 import ctypes as c
 from ctypes import wintypes as w
+import socket
+from threading import Thread
 import tkinter as tk
 from tkinter import ttk, colorchooser, font
 
@@ -8,6 +10,26 @@ from win32 import (user32, toplevel_hwnd, add_exstyle, HWND_TOPMOST, SWP_NOMOVE,
                    SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
 
 DWORD = w.DWORD
+DEFAULT_PING_HOST = '223.5.5.5'
+PING_INTERVAL = 2.0          # Ping 采样间隔（秒），在后台线程执行不阻塞界面
+PING_TIMEOUT_MS = 1000
+NVML_TEMPERATURE_GPU = 0
+INVALID_HANDLE = c.c_void_p(-1).value
+
+
+class IpOptionInformation(c.Structure):
+    _fields_ = [
+        ('ttl', c.c_ubyte), ('tos', c.c_ubyte), ('flags', c.c_ubyte),
+        ('options_size', c.c_ubyte), ('options_data', c.c_void_p),
+    ]
+
+
+class IcmpEchoReply(c.Structure):
+    _fields_ = [
+        ('address', c.c_uint32), ('status', c.c_uint32), ('rtt', c.c_uint32),
+        ('data_size', c.c_uint16), ('reserved', c.c_uint16),
+        ('data', c.c_void_p), ('options', IpOptionInformation),
+    ]
 
 
 class Memory(c.Structure):
@@ -46,6 +68,93 @@ _ip.GetIfTable2.argtypes = [c.POINTER(c.POINTER(InterfaceTable))]
 _ip.GetIfTable2.restype = w.DWORD
 _ip.FreeMibTable.argtypes = [c.c_void_p]
 _ip.FreeMibTable.restype = None
+_ip.IcmpCreateFile.restype = c.c_void_p
+_ip.IcmpCloseHandle.argtypes = [c.c_void_p]
+_ip.IcmpCloseHandle.restype = w.BOOL
+_ip.IcmpSendEcho.argtypes = [
+    c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint16,
+    c.c_void_p, c.c_void_p, c.c_uint32, c.c_uint32,
+]
+_ip.IcmpSendEcho.restype = c.c_uint32
+
+_ws2 = c.WinDLL('ws2_32')
+_ws2.inet_addr.argtypes = [c.c_char_p]
+_ws2.inet_addr.restype = c.c_uint32
+
+
+class GpuTempReader:
+    """通过 NVIDIA 驱动自带的 nvml.dll 直接读取显卡温度（零权限、耗时 < 0.2ms）。"""
+
+    _DLL_PATHS = (
+        'nvml.dll',
+        r'C:\Windows\System32\nvml.dll',
+        r'C:\Program Files\NVIDIA Corporation\NVSMI\nvml.dll',
+    )
+
+    def __init__(self):
+        self._nvml = None
+        self._device = None
+        self._probed = False
+
+    def _init(self):
+        self._probed = True
+        for path in self._DLL_PATHS:
+            try:
+                dll = c.CDLL(path)
+                dll.nvmlInit_v2.restype = c.c_int
+                dll.nvmlShutdown.restype = c.c_int
+                dll.nvmlDeviceGetCount_v2.argtypes = [c.POINTER(c.c_uint)]
+                dll.nvmlDeviceGetCount_v2.restype = c.c_int
+                dll.nvmlDeviceGetHandleByIndex_v2.argtypes = [c.c_uint, c.POINTER(c.c_void_p)]
+                dll.nvmlDeviceGetHandleByIndex_v2.restype = c.c_int
+                dll.nvmlDeviceGetTemperature.argtypes = [c.c_void_p, c.c_int, c.POINTER(c.c_uint)]
+                dll.nvmlDeviceGetTemperature.restype = c.c_int
+                if dll.nvmlInit_v2() != 0:
+                    continue
+                count = c.c_uint()
+                if dll.nvmlDeviceGetCount_v2(c.byref(count)) == 0 and count.value > 0:
+                    dev = c.c_void_p()
+                    if dll.nvmlDeviceGetHandleByIndex_v2(0, c.byref(dev)) == 0:
+                        self._nvml = dll
+                        self._device = dev
+                        return
+                dll.nvmlShutdown()
+            except OSError:
+                continue
+
+    def read(self):
+        if not self._probed:
+            self._init()
+        if not self._nvml or not self._device:
+            return None
+        temp = c.c_uint()
+        if self._nvml.nvmlDeviceGetTemperature(self._device, NVML_TEMPERATURE_GPU, c.byref(temp)) == 0:
+            return int(temp.value)
+        return None
+
+
+def ping_once(host):
+    """使用 Windows 原生 ICMP API 发一次回显测试，返回往返毫秒数，失败或超时返回 None。"""
+    target = (host or DEFAULT_PING_HOST).strip() or DEFAULT_PING_HOST
+    try:
+        ip_str = socket.gethostbyname(target)
+    except OSError:
+        return None
+    addr = _ws2.inet_addr(ip_str.encode('ascii', 'ignore'))
+    if addr == 0xFFFFFFFF:
+        return None
+    handle = _ip.IcmpCreateFile()
+    if not handle or handle == INVALID_HANDLE:
+        return None
+    try:
+        buf = c.create_string_buffer(c.sizeof(IcmpEchoReply) + 64)
+        count = _ip.IcmpSendEcho(handle, addr, b'ping', 4, None, buf, len(buf), PING_TIMEOUT_MS)
+        if not count:
+            return None
+        reply = IcmpEchoReply.from_buffer_copy(buf)
+        return int(reply.rtt) if reply.status == 0 else None
+    finally:
+        _ip.IcmpCloseHandle(handle)
 
 
 # MIB_IF_ROW2 物理网卡类型：以太网(6)、Wi-Fi(71)、WWAN(243/244)
@@ -82,6 +191,32 @@ class Sampler:
         self.cpu = None
         self.net = None
         self.last = 0.0
+        self.gpu = GpuTempReader()
+        self._ping_text = '—'
+        self._ping_host = ''
+        self._ping_at = 0.0
+        self._ping_busy = False
+
+    def _schedule_ping(self, host, now):
+        target = (host or DEFAULT_PING_HOST).strip() or DEFAULT_PING_HOST
+        if target != self._ping_host:
+            self._ping_host = target
+            self._ping_text = '—'
+            self._ping_at = 0.0
+        if self._ping_busy or now - self._ping_at < PING_INTERVAL:
+            return
+        self._ping_busy = True
+        self._ping_at = now
+
+        def worker():
+            try:
+                rtt = ping_once(target)
+                if self._ping_host == target:
+                    self._ping_text = f'{rtt} ms' if rtt is not None else '超时'
+            finally:
+                self._ping_busy = False
+
+        Thread(target=worker, name='monitor-ping', daemon=True).start()
 
     def read(self, cfg, now):
         """按配置仅采集启用的监控项，返回键值映射。"""
@@ -105,6 +240,10 @@ class Sampler:
             value = f'{mem.load}%' if _kernel.GlobalMemoryStatusEx(c.byref(mem)) else '—'
             readings['memory'] = '内存    ' + value
 
+        if cfg.get('temp'):
+            temp = self.gpu.read()
+            readings['temp'] = f'温度    {temp}°C' if temp is not None else '温度    —'
+
         if cfg.get('net'):
             current = network()
             rates = ['—', '—']
@@ -123,12 +262,17 @@ class Sampler:
         else:
             self.net = None
 
+        if cfg.get('ping'):
+            self._schedule_ping(cfg.get('ping_host', DEFAULT_PING_HOST), now)
+            readings['ping'] = '延迟    ' + self._ping_text
+
         return readings
 
 
 class SystemMonitor:
     defaults = dict(edge='左', size=15, alpha=90, fg='#F1F5F9', bg='#243040',
-                    shape='圆角', cpu=True, memory=True, net=True, pinned=False, over_fullscreen=True)
+                    shape='圆角', cpu=True, memory=True, temp=True, net=True,
+                    ping=True, ping_host=DEFAULT_PING_HOST, pinned=False, over_fullscreen=True)
     keycolor = '#010203'
 
     def __init__(self, widgets, bounds):
@@ -193,8 +337,10 @@ class SystemMonitor:
         items = [
             ('cpu', 'CPU', cfg['cpu']),
             ('memory', '内存', cfg['memory']),
+            ('temp', '温度', cfg['temp']),
             ('down', '↓', cfg['net']),
             ('up', '↑', cfg['net']),
+            ('ping', '延迟', cfg['ping']),
         ]
         self.text = '\n'.join(self.readings.get(k, label + '    —') for k, label, enabled in items if enabled)
         self.font.configure(size=cfg['size'])
@@ -282,7 +428,8 @@ class SystemMonitor:
                 old_edge = committed.get('edge')
                 for key, var in variables.items():
                     self.cfg[key] = var.get()
-                if not any(self.cfg[key] for key in ('cpu', 'memory', 'net')):
+                self.cfg['ping_host'] = self.cfg.get('ping_host', '').strip() or DEFAULT_PING_HOST
+                if not any(self.cfg[key] for key in ('cpu', 'memory', 'temp', 'net', 'ping')):
                     self.cfg['cpu'] = True
                 if self.cfg.get('edge') != old_edge:
                     # 切换呼出边缘后清除旧的固定坐标，避免下次仍弹在原来的另一侧
@@ -311,7 +458,7 @@ class SystemMonitor:
                 return
             for k, var in variables.items():
                 self.cfg[k] = var.get()
-            if not any(self.cfg[k] for k in ('cpu', 'memory', 'net')):
+            if not any(self.cfg[k] for k in ('cpu', 'memory', 'temp', 'net', 'ping')):
                 variables['cpu'].set(True)
                 self.cfg['cpu'] = True
             self.apply()
@@ -341,10 +488,17 @@ class SystemMonitor:
             variables[key] = tk.StringVar(master=d, value=self.cfg[key])
             ttk.Button(box, text=title, command=lambda k=key: choose(k)).pack(fill='x')
 
-        for key, title in [('cpu', 'CPU'), ('memory', '内存'), ('net', '上传与下载'),
+        for key, title in [('cpu', 'CPU'), ('memory', '内存'), ('temp', '显卡温度'),
+                           ('net', '上传与下载'), ('ping', '网络延迟 (Ping)'),
                            ('pinned', '固定显示'), ('over_fullscreen', '全屏 / 游戏时保持置顶')]:
             variables[key] = tk.BooleanVar(value=self.cfg[key])
             ttk.Checkbutton(box, text=title, variable=variables[key], command=change).pack(anchor='w')
+
+        ping_row = ttk.Frame(box)
+        ping_row.pack(fill='x', pady=(4, 0))
+        ttk.Label(ping_row, text='延迟目标', width=10).pack(side='left')
+        variables['ping_host'] = tk.StringVar(value=self.cfg['ping_host'])
+        ttk.Entry(ping_row, textvariable=variables['ping_host'], width=14).pack(side='left', fill='x', expand=True)
 
         ttk.Label(box, text='与启动栏共用右边缘时，监控占上半段。').pack(pady=5)
         actions = ttk.Frame(box)
