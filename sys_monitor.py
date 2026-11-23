@@ -4,6 +4,9 @@ from ctypes import wintypes as w
 import tkinter as tk
 from tkinter import ttk, colorchooser, font
 
+from win32 import (user32, toplevel_hwnd, add_exstyle, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+                   SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
+
 DWORD = w.DWORD
 
 
@@ -119,7 +122,7 @@ class Sampler:
 
 class SystemMonitor:
     defaults = dict(edge='左', size=15, alpha=90, fg='#F1F5F9', bg='#243040',
-                    shape='圆角', cpu=True, memory=True, net=True, pinned=False)
+                    shape='圆角', cpu=True, memory=True, net=True, pinned=False, over_fullscreen=True)
     keycolor = '#010203'
 
     def __init__(self, widgets, bounds):
@@ -149,6 +152,9 @@ class SystemMonitor:
 
         self.canvas = tk.Canvas(self.win, bg=self.keycolor, highlightthickness=0)
         self.canvas.pack()
+        # 工具窗口 + 不抢焦点，保证浮在游戏/全屏窗口上时不会把游戏切出去
+        self.hwnd = toplevel_hwnd(self.win)
+        add_exstyle(self.hwnd, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
         self.font = font.Font(family='Segoe UI', size=self.cfg['size'])
         self.canvas.bind('<ButtonPress-1>', self.press)
         self.canvas.bind('<B1-Motion>', self.drag)
@@ -324,7 +330,8 @@ class SystemMonitor:
             variables[key] = tk.StringVar(master=d, value=self.cfg[key])
             ttk.Button(box, text=title, command=lambda k=key: choose(k)).pack(fill='x')
 
-        for key, title in [('cpu', 'CPU'), ('memory', '内存'), ('net', '上传与下载'), ('pinned', '固定显示')]:
+        for key, title in [('cpu', 'CPU'), ('memory', '内存'), ('net', '上传与下载'),
+                           ('pinned', '固定显示'), ('over_fullscreen', '全屏 / 游戏时保持置顶')]:
             variables[key] = tk.BooleanVar(value=self.cfg[key])
             ttk.Checkbutton(box, text=title, variable=variables[key], command=change).pack(anchor='w')
 
@@ -333,6 +340,10 @@ class SystemMonitor:
         actions.pack(fill='x', pady=6)
         ttk.Button(actions, text='取消', command=lambda: finish(False)).pack(side='right')
         ttk.Button(actions, text='确定', command=lambda: finish(True)).pack(side='right', padx=5)
+
+    def raise_(self):
+        """将监控窗口保持在所有普通/无边框全屏窗口最顶层，且不抢焦点。"""
+        user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     def show(self, x, y, now):
         self.visible = True
@@ -344,6 +355,7 @@ class SystemMonitor:
         self.place(*pos)
         self.win.attributes('-alpha', 0)
         self.win.deiconify()
+        self.raise_()
 
         def brighten(step):
             if not self.visible or not self.win.winfo_exists():
@@ -362,10 +374,11 @@ class SystemMonitor:
 
     def tick(self, now, x, y, monitor, blocked, bar_enabled, suppress_edge=False):
         l, t, r, b = monitor
+        hide_blocked = blocked and not self.cfg['over_fullscreen']
         edge = not suppress_edge and (
             x < l + 3 if self.cfg['edge'] == '左' else x >= r - 3 and (not bar_enabled or y < (t + b) // 2)
         )
-        if blocked or not edge:
+        if hide_blocked or not edge:
             self.edge_start = None
         elif self.edge_start is None or self.edge_monitor != monitor:
             self.edge_start = now
@@ -373,7 +386,7 @@ class SystemMonitor:
                 self.sample(now)
             self.edge_monitor = monitor
 
-        if not self.visible and not blocked and (
+        if not self.visible and not hide_blocked and (
             self.cfg['pinned'] or (self.edge_start is not None and now - self.edge_start >= 0.25)
         ):
             self.show(x, y, now)
@@ -384,7 +397,7 @@ class SystemMonitor:
             editing = bool(self.dialog and self.dialog.winfo_exists())
             if inside or edge or editing or self.drag_offset:
                 self.last_inside = now
-            if not editing and (blocked or (not self.cfg['pinned'] and now - self.last_inside >= 1.5)):
+            if not editing and (hide_blocked or (not self.cfg['pinned'] and now - self.last_inside >= 1.5)):
                 if self.fade:
                     self.win.after_cancel(self.fade)
                     self.fade = None
@@ -393,4 +406,6 @@ class SystemMonitor:
             elif now - self.last_sample >= 1:
                 self.sample(now)
                 self.render()
+                # 周期性维持最顶层，防止被刚切到前台的游戏/全屏窗口盖住
+                self.raise_()
         return edge and self.cfg['edge'] == '右'

@@ -186,15 +186,15 @@ class App:
 
         root.protocol('WM_DELETE_WINDOW', self.hide_window)
 
-        # 系统托盘图标：左键切换显示/隐藏，右键菜单
+        # 系统托盘图标：左键切换显示/隐藏，右键菜单（用 after(0) 立即响应，不被轮询推迟）
         top_hwnd = toplevel_hwnd(root)
         self.tray = TrayIcon(top_hwnd,
-                             lambda: root.after_idle(self._tray_toggle),
-                             lambda: root.after_idle(self._tray_open),
-                             lambda: root.after_idle(self.quit_app))
-        self.tray.on_resume = lambda: root.after_idle(self.resume_desktop)
-        self.tray.on_theme = lambda: root.after_idle(self.toggle_theme)
-        self.tray.schedule = root.after_idle
+                             lambda: root.after(0, self._tray_toggle),
+                             lambda: root.after(0, self._tray_open),
+                             lambda: root.after(0, self.quit_app))
+        self.tray.on_resume = lambda: root.after(0, self.resume_desktop)
+        self.tray.on_theme = lambda: root.after(0, self.toggle_theme)
+        self.tray.schedule = lambda fn: root.after(0, fn)
         self.mouse_cutoff = 0
         self.tray.menu_closed = self.discard_mouse
         self.tray.install()
@@ -430,6 +430,14 @@ class App:
         if self._quitting:
             return
         self._quitting = True
+        # 先立刻隐藏所有窗口并移除托盘图标，避免清理 I/O 与钩子卸载造成“退出卡一下”
+        try:
+            self.root.withdraw()
+            self.widgets.hide_all()
+        except tk.TclError:
+            pass
+        self.tray.destroy()
+
         state = icons_visible()
         if state is not None:
             self.cfg['last_visible'] = state
@@ -446,7 +454,6 @@ class App:
                 self.recovery_guard.stdin.close()
             except OSError:
                 pass
-        self.tray.destroy()
         self.root.destroy()
 
     # ------------------------------------------------------------ 显示恢复

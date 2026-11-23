@@ -137,6 +137,17 @@ class Widgets:
     def busy(self):
         return self.bar.busy
 
+    def hide_all(self):
+        """退出时立即隐藏全部挂件和弹窗，做到点击即消失。"""
+        self.hide_weather_tip()
+        for win in (self.clock, self.theme_button.win, self.bar.win, self.monitor.win,
+                    self.settings_window, self.monitor.dialog):
+            if win is not None:
+                try:
+                    win.withdraw()
+                except tk.TclError:
+                    pass
+
     def save(self):
         self.cfg['weather_enabled'] = self.weather_on.get()
         if self.weather:
