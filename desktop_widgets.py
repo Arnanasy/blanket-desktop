@@ -25,8 +25,8 @@ from theme_button import ThemeButton
 from wallpaper_clock import sample
 from widget_layout import AnchorRegistry, capture_anchor, resolve_anchor
 from win32 import (user32, dwmapi, RECT, GetWindowLongPtr, class_name, cursor_pos, toplevel_hwnd,
-                   add_exstyle, GWL_STYLE, WS_CAPTION, DWMWA_EXTENDED_FRAME_BOUNDS, HWND_BOTTOM,
-                   SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE,
+                   add_exstyle, place_on_desktop, GWL_STYLE, WS_CAPTION, DWMWA_EXTENDED_FRAME_BOUNDS,
+                   HWND_BOTTOM, SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE,
                    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
                    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN)
 
@@ -123,6 +123,7 @@ class Widgets:
         self.last_theme = 0
         self.last_clock = ''
         self.last_desktop_foreground = None
+        self._was_on_desktop = False
         self.last_position_check = 0
         self.root.after(TICK_MS, self.tick)
 
@@ -162,7 +163,8 @@ class Widgets:
         self.hide_weather_tip()
         self.media.close()
         for win in (self.clock, self.theme_button.win, self.bar.win, self.monitor.win,
-                    self.media.win, self.media.dialog, self.settings_window, self.monitor.dialog):
+                    self.media.win, self.media.lyrics.win, self.media.dialog,
+                    self.settings_window, self.monitor.dialog):
             if win is not None:
                 try:
                     win.withdraw()
@@ -513,14 +515,12 @@ class Widgets:
         if self.clock.winfo_viewable():
             user32.SetWindowPos(self.clock_hwnd, HWND_BOTTOM, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
 
-    def _show_clock(self):
+    def _show_clock(self, on_desktop=False):
         width, height = self.clock.winfo_reqwidth(), self.clock.winfo_reqheight()
         x, y = resolve_anchor(self.cfg.get('anchor'), self._saved_position(), width, height)
         self.cfg['position'] = [x, y]
         self.clock.geometry(f'{x:+d}{y:+d}')
-        # 原生 SW_SHOWNOACTIVATE 显示：不抢前台焦点；Tk 的映射状态会随之同步（已验证）
-        user32.ShowWindow(self.clock_hwnd, SW_SHOWNOACTIVATE)
-        user32.SetWindowPos(self.clock_hwnd, HWND_BOTTOM, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+        place_on_desktop(self.clock_hwnd, x, y, on_desktop=on_desktop, show=True)
 
     def fullscreen_active(self, hwnd, name):
         if not hwnd or name in SHELL_CLASSES:
@@ -594,14 +594,19 @@ class Widgets:
         if desktop_foreground and desktop_foreground != self.last_desktop_foreground:
             invalidate_cache()       # 桌面窗口可能被重建，重新查找
         self.last_desktop_foreground = desktop_foreground
+        on_desktop = bool(desktop_foreground) or (not foreground) or name in ('Shell_TrayWnd', 'Shell_SecondaryTrayWnd')
+        restack = (on_desktop != self._was_on_desktop) or bool(user32.IsIconic(self.clock_hwnd))
+        self._was_on_desktop = on_desktop
         blocked = self.fullscreen_active(foreground, name)
         icons = self.app.desktop_icons_visible()
 
-        # 时钟：仅在图标隐藏、且没有全屏程序时显示
+        # 时钟：仅在图标隐藏、且没有全屏程序时显示；退回桌面或 Win+D 时自动拉回桌面之上
         visible = bool(self.clock.winfo_viewable())
         if self.clock_on.get() and icons is False and not blocked:
             if not visible:
-                self._show_clock()
+                self._show_clock(on_desktop=on_desktop)
+            elif restack and self.offset is None:
+                place_on_desktop(self.clock_hwnd, on_desktop=on_desktop, show=True)
             elif self.offset is None and now - self.last_position_check > 1:
                 # 显示器布局变化后把时钟拉回可见区域；拖动中不干预
                 self.place_clock(self.clock.winfo_x(), self.clock.winfo_y())
@@ -613,7 +618,7 @@ class Widgets:
         monitor = bounds(p.x, p.y)
         monitor_edge = self.monitor.tick(now, p.x, p.y, monitor, blocked, self.bar.enabled.get(),
                                          suppress_edge=theme_edge, foreground=foreground)
-        self.media.tick(now, blocked, icons)
+        self.media.tick(now, blocked, icons, on_desktop=on_desktop, force_restack=restack)
         bar_opened = self.bar.tick(now, p, monitor, blocked, monitor_edge, theme_edge)
         if bar_opened:
             self.theme_button.raise_()

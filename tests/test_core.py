@@ -281,6 +281,22 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         self.assertEqual(prefs['style'], mw.MEDIA_DEFAULTS['style'])
         self.assertEqual(prefs['pause_hide'], 0)
 
+        # 按像素宽度截断测试：确保中英文混排绝不超宽
+        measure = lambda s: sum(14 if ord(ch) > 127 else 7 for ch in s)
+        fitted = mw.fit_text_width('这是一首特别长的中文歌曲标题测试', measure, 90)
+        self.assertLessEqual(measure(fitted), 90)
+        self.assertTrue(fitted.endswith('…'))
+
+    def test_lrc_parser_and_current_lines(self):
+        import lyrics_widget as lw
+
+        sample = '[00:05.50]第一句歌词\n[00:10.00][00:20.00]副歌重复\n[00:15.25]第二句歌词\n'
+        parsed = lw.parse_lrc(sample)
+        self.assertEqual(len(parsed), 4)
+        self.assertEqual(lw.current_lyric_lines(parsed, 2.0), ('', '第一句歌词'))
+        self.assertEqual(lw.current_lyric_lines(parsed, 6.0), ('第一句歌词', '副歌重复'))
+        self.assertEqual(lw.current_lyric_lines(parsed, 21.0), ('副歌重复', ''))
+
 
 if __name__ == '__main__':
     unittest.main()

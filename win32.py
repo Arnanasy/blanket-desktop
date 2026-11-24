@@ -39,7 +39,9 @@ WS_CAPTION = 0x00C00000              # 标题栏（用于区分普通最大化�
 WS_EX_TOOLWINDOW = 0x00000080        # 不在任务栏 / Alt+Tab 中出现
 WS_EX_NOACTIVATE = 0x08000000        # 点击不抢焦点
 DWMWA_EXTENDED_FRAME_BOUNDS = 9      # DWM 真实可见窗口边界（不含隐形阴影）
+HWND_TOP = 0
 HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
 HWND_BOTTOM = 1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
@@ -49,6 +51,7 @@ SWP_SHOWWINDOW = 0x0040
 SW_HIDE = 0
 SW_SHOWNOACTIVATE = 4
 SW_SHOW = 5
+SW_RESTORE = 9
 GA_ROOT = 2
 
 # 输入
@@ -222,6 +225,7 @@ _sig(user32.FindWindowExW, HWND, HWND, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
 _sig(user32.EnumWindows, BOOL, WNDENUMPROC, wintypes.LPARAM)
 _sig(user32.ShowWindow, BOOL, HWND, INT)
 _sig(user32.ShowWindowAsync, BOOL, HWND, INT)
+_sig(user32.IsIconic, BOOL, HWND)
 _sig(user32.IsWindow, BOOL, HWND)
 _sig(user32.IsWindowVisible, BOOL, HWND)
 _sig(user32.GetSystemMetrics, INT, INT)
@@ -338,3 +342,19 @@ def cursor_pos():
     p = POINT()
     user32.GetCursorPos(ctypes.byref(p))
     return p
+
+
+def place_on_desktop(hwnd, x=None, y=None, on_desktop=False, show=False):
+    """把桌面挂件稳稳放在壁纸之上、普通软件之下；切回桌面或 Win+D 后自动恢复可见。"""
+    if not hwnd:
+        return
+    if user32.IsIconic(hwnd) or show:
+        user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
+    flags = SWP_NOSIZE | SWP_NOACTIVATE
+    if x is None or y is None:
+        flags |= SWP_NOMOVE
+        x, y = 0, 0
+    if show:
+        flags |= SWP_SHOWWINDOW
+    z = HWND_TOP if on_desktop else HWND_BOTTOM
+    user32.SetWindowPos(hwnd, z, int(x), int(y), 0, 0, flags)

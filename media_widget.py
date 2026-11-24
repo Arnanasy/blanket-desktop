@@ -1,12 +1,13 @@
-"""三态自动隐身桌面音乐胶囊：基于 Windows 原生 SMTC，支持封面提取、缓动展开、切歌控制与完整外观自定义。
+"""三态自动隐身桌面音乐胶囊：基于 Windows 原生 SMTC，支持封面提取、缓动展开、切歌控制、可选同步歌词与完整外观自定义。
 
 三态交互：
 1. 无活跃媒体（或暂停超过设定秒数且未锁定）→ 自动隐藏；
 2. 播放中（紧凑态）→ 仅显示圆角专辑封面；
 3. 鼠标移入 / 锁定（展开态）→ 缓动展开歌名、歌手与上一首/播放暂停/下一首按钮（动画中途可打断）。
-支持：Ctrl+滚轮调大小、滚轮调不透明度、左键拖动、双击锁定、右键打开音乐胶囊设置。
+支持：Ctrl+滚轮调大小、滚轮调不透明度、左键拖动、双击锁定、右键打开音乐胶囊与歌词设置。
 """
 import asyncio
+from datetime import datetime, timezone
 from io import BytesIO
 import logging
 import queue
@@ -14,11 +15,12 @@ import re
 from threading import Event, Thread
 import time
 import tkinter as tk
-from tkinter import colorchooser, ttk
+from tkinter import colorchooser, font as tkfont, ttk
 
+from lyrics_widget import (LYRICS_DEFAULTS, LYRICS_LINE_OPTIONS, LYRICS_MODES, LyricsOverlay)
 from widget_layout import capture_anchor, clamp_to_work_area, resolve_anchor
-from win32 import (user32, toplevel_hwnd, add_exstyle, HWND_BOTTOM, SW_SHOWNOACTIVATE,
-                   SWP_NOSIZE, SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
+from win32 import (toplevel_hwnd, add_exstyle, place_on_desktop,
+                   WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
 
 log = logging.getLogger('desktop')
 
@@ -29,7 +31,7 @@ ACCENT_PAUSE = '#94A3B8'
 
 BASE_COVER = 56
 BASE_COMPACT_W = 68
-BASE_EXPANDED_W = 308
+BASE_EXPANDED_W = 352
 BASE_CARD_H = 68
 POLL_INTERVAL = 1.2
 HOVER_LINGER = 0.45
@@ -39,7 +41,7 @@ DEFAULT_MEDIA_POS = [40, 260]
 
 MEDIA_STYLES = ('圆角胶囊', '方形卡片', '极简透明')
 MEDIA_DEFAULTS = dict(
-    scale=135,          # 缩放百分比（80..220），默认比初版更大更清晰
+    scale=135,          # 缩放百分比（80..220）
     opacity=94,         # 不透明度（35..100）
     bg='#18202D',       # 卡片背景色
     fg='#F8FAFC',       # 主文字颜色
@@ -47,12 +49,14 @@ MEDIA_DEFAULTS = dict(
     style='圆角胶囊',     # 卡片样式
     pause_hide=12,      # 暂停后自动隐藏秒数（0 表示暂停时不自动隐藏）
     radius=16,          # 圆角半径（4..32）
+    **LYRICS_DEFAULTS,
 )
 MEDIA_RANGES = (
     ('scale', 80, 220),
     ('opacity', 35, 100),
     ('pause_hide', 0, 60),
     ('radius', 4, 32),
+    ('lyrics_size', 14, 42),
 )
 
 try:
@@ -85,18 +89,46 @@ def truncate_text(text, max_chars=18):
     return s[:max_chars - 1] + '…'
 
 
+def fit_text_width(text, measure_fn, max_px):
+    """按实际像素宽度安全截断文本，杜绝中英文混排时文字与右侧按钮重合。"""
+    s = (text or '').strip()
+    if not s or max_px <= 12:
+        return ''
+    if measure_fn(s) <= max_px:
+        return s
+    ellipsis = '…'
+    lo, hi = 0, len(s)
+    best = ''
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand = s[:mid] + ellipsis if mid > 0 else ellipsis
+        if measure_fn(cand) <= max_px:
+            best = cand
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best
+
+
 def sanitize_media_prefs(raw):
-    """清洗并补全音乐胶囊的外观与行为配置。"""
+    """清洗并补全音乐胶囊与同步歌词的外观与行为配置。"""
     prefs = MEDIA_DEFAULTS.copy()
     if isinstance(raw, dict):
         for k, default in MEDIA_DEFAULTS.items():
             v = raw.get(k)
-            if type(v) is type(default):
+            if isinstance(default, float) and isinstance(v, (int, float)) and not isinstance(v, bool):
+                prefs[k] = float(v)
+            elif type(v) is type(default):
                 prefs[k] = v
     for k, lo, hi in MEDIA_RANGES:
         prefs[k] = max(lo, min(hi, int(prefs[k])))
+    prefs['lyrics_offset'] = round(max(-3.0, min(3.0, float(prefs['lyrics_offset']))), 1)
     if prefs['style'] not in MEDIA_STYLES:
         prefs['style'] = MEDIA_DEFAULTS['style']
+    if prefs['lyrics_mode'] not in LYRICS_MODES:
+        prefs['lyrics_mode'] = MEDIA_DEFAULTS['lyrics_mode']
+    if prefs['lyrics_lines'] not in LYRICS_LINE_OPTIONS:
+        prefs['lyrics_lines'] = MEDIA_DEFAULTS['lyrics_lines']
     for k in ('bg', 'fg', 'accent'):
         if not (isinstance(prefs[k], str) and re.fullmatch(r'#[0-9a-fA-F]{6}', prefs[k])):
             prefs[k] = MEDIA_DEFAULTS[k]
@@ -104,7 +136,6 @@ def sanitize_media_prefs(raw):
 
 
 def _make_rounded_cover(raw_bytes, size, radius=10):
-    """将封面二进制转为圆角 Tk PhotoImage；缺省或失败时返回 None。"""
     if not HAS_PIL or not raw_bytes:
         return None
     try:
@@ -126,12 +157,15 @@ def _make_rounded_cover(raw_bytes, size, radius=10):
 
 
 class _SmtcWorker:
-    """后台线程维护单个 asyncio 事件循环，安全读取 SMTC 状态并执行切歌指令。"""
+    """后台线程维护单个 asyncio 事件循环，安全读取 SMTC 状态、进度与执行切歌指令。"""
 
     def __init__(self):
         self._stop = Event()
         self._cmds = queue.SimpleQueue()
-        self._state = {'active': False, 'playing': False, 'title': '', 'artist': '', 'thumb': None, 'key': None}
+        self._state = {
+            'active': False, 'playing': False, 'title': '', 'artist': '',
+            'thumb': None, 'key': None, 'pos_base': 0.0, 'pos_at': 0.0, 'duration': 0.0,
+        }
         self._version = 0
         self._last_thumb_key = None
         self._last_thumb = None
@@ -152,6 +186,19 @@ class _SmtcWorker:
 
     def snapshot(self):
         return self._version, self._state
+
+    def estimated_position(self, now_mono=None):
+        st = self._state
+        if not st['active']:
+            return 0.0
+        base = st.get('pos_base', 0.0)
+        if not st['playing']:
+            return base
+        t = time.monotonic() if now_mono is None else now_mono
+        elapsed = max(0.0, t - st.get('pos_at', t))
+        pos = base + elapsed
+        dur = st.get('duration', 0.0)
+        return min(dur, pos) if dur > 0 else pos
 
     def _run(self):
         loop = asyncio.new_event_loop()
@@ -179,11 +226,35 @@ class _SmtcWorker:
         except Exception:
             return None
 
+    def _read_timeline(self, session, playing):
+        try:
+            tl = session.get_timeline_properties()
+            if tl is None:
+                return 0.0, time.monotonic(), 0.0
+            pos = max(0.0, tl.position.total_seconds())
+            dur = max(0.0, tl.end_time.total_seconds())
+            now_mono = time.monotonic()
+            if playing and tl.last_updated_time is not None:
+                upd = tl.last_updated_time
+                if upd.tzinfo is None:
+                    upd = upd.replace(tzinfo=timezone.utc)
+                delta = (datetime.now(timezone.utc) - upd).total_seconds()
+                if 0.0 <= delta < 3600.0:
+                    pos += delta
+            if dur > 0:
+                pos = min(dur, pos)
+            return pos, now_mono, dur
+        except Exception:
+            return 0.0, time.monotonic(), 0.0
+
     async def _poll_once(self, mgr):
         session = mgr.get_current_session()
         if session is None:
             if self._state['active']:
-                self._state = {'active': False, 'playing': False, 'title': '', 'artist': '', 'thumb': None, 'key': None}
+                self._state = {
+                    'active': False, 'playing': False, 'title': '', 'artist': '',
+                    'thumb': None, 'key': None, 'pos_base': 0.0, 'pos_at': 0.0, 'duration': 0.0,
+                }
                 self._version += 1
             return
 
@@ -193,7 +264,10 @@ class _SmtcWorker:
         paused = status == _PlaybackStatus.PAUSED
         if not (playing or paused):
             if self._state['active']:
-                self._state = {'active': False, 'playing': False, 'title': '', 'artist': '', 'thumb': None, 'key': None}
+                self._state = {
+                    'active': False, 'playing': False, 'title': '', 'artist': '',
+                    'thumb': None, 'key': None, 'pos_base': 0.0, 'pos_at': 0.0, 'duration': 0.0,
+                }
                 self._version += 1
             return
 
@@ -207,15 +281,21 @@ class _SmtcWorker:
             self._last_thumb = await self._read_thumb(info.thumbnail if info else None)
             self._last_thumb_key = key
 
-        if not self._state['active'] or self._state['playing'] != playing or self._state['key'] != key:
-            self._state = {
-                'active': True,
-                'playing': playing,
-                'title': title,
-                'artist': artist,
-                'thumb': self._last_thumb,
-                'key': key,
-            }
+        pos_base, pos_at, duration = self._read_timeline(session, playing)
+        changed = (not self._state['active'] or self._state['playing'] != playing
+                   or self._state['key'] != key)
+        self._state = {
+            'active': True,
+            'playing': playing,
+            'title': title,
+            'artist': artist,
+            'thumb': self._last_thumb,
+            'key': key,
+            'pos_base': pos_base,
+            'pos_at': pos_at,
+            'duration': duration,
+        }
+        if changed:
             self._version += 1
 
     async def _drain_cmds(self, mgr):
@@ -252,7 +332,7 @@ class _SmtcWorker:
 
 
 class MediaWidget:
-    """三态自动隐身桌面音乐胶囊。"""
+    """三态自动隐身桌面音乐胶囊（含可选同步歌词条）。"""
 
     def __init__(self, widgets, cfg, on_save, on_settings):
         self.widgets = widgets
@@ -272,12 +352,18 @@ class MediaWidget:
 
         self.worker = _SmtcWorker()
         self._seen_version = -1
-        self._state = {'active': False, 'playing': False, 'title': '', 'artist': '', 'thumb': None, 'key': None}
+        self._state = {
+            'active': False, 'playing': False, 'title': '', 'artist': '',
+            'thumb': None, 'key': None, 'pos_base': 0.0, 'pos_at': 0.0, 'duration': 0.0,
+        }
         self._cover_cache_key = None
         self._cover_photo = None
         self._paused_since = None
         self._last_alpha = None
         self._hint_timer = None
+        self._font_key = None
+        self._title_font = None
+        self._artist_font = None
 
         # 可打断的展开/收起缓动状态
         self._progress = 1.0 if self.locked else 0.0
@@ -317,6 +403,9 @@ class MediaWidget:
         self.hwnd = toplevel_hwnd(self.win)
         add_exstyle(self.hwnd, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
 
+        # 可选同步歌词浮窗
+        self.lyrics = LyricsOverlay(self, cfg)
+
         if self.enabled.get():
             self.worker.start()
 
@@ -328,12 +417,13 @@ class MediaWidget:
             'anchor': self.anchor,
         }
         data.update(self.prefs)
+        data.update(self.lyrics.config())
         return data
 
     def close(self):
         self.worker.stop()
 
-    # ------------------------------------------------------------ 尺寸计算
+    # ------------------------------------------------------------ 尺寸与字体
     def _k(self):
         return (self.prefs['scale'] / 100.0) * max(1.0, getattr(self.widgets, 'ui_scale', 1.0))
 
@@ -344,7 +434,7 @@ class MediaWidget:
         return max(44, round(BASE_COMPACT_W * self._k()))
 
     def _expanded_w(self):
-        return max(200, round(BASE_EXPANDED_W * self._k()))
+        return max(240, round(BASE_EXPANDED_W * self._k()))
 
     def _card_h(self):
         return max(44, round(BASE_CARD_H * self._k()))
@@ -353,13 +443,20 @@ class MediaWidget:
         cw, ew = self._compact_w(), self._expanded_w()
         return round(cw + (ew - cw) * self._progress)
 
-    def relayout(self):
-        """按锚点将挂件归位到当前屏幕工作区内。"""
+    def _ensure_fonts(self, title_pt, artist_pt):
+        key = (title_pt, artist_pt)
+        if key != self._font_key:
+            self._title_font = tkfont.Font(family='Microsoft YaHei UI', size=title_pt, weight='bold')
+            self._artist_font = tkfont.Font(family='Microsoft YaHei UI', size=artist_pt)
+            self._font_key = key
+
+    def relayout(self, on_desktop=False):
         w, h = self._current_width(), self._card_h()
         x, y = resolve_anchor(self.anchor, self.pos, w, h, margin=8)
         self.pos = [x, y]
         if self.win.winfo_viewable():
-            user32.SetWindowPos(self.hwnd, HWND_BOTTOM, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+            place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop)
+        self.lyrics.relayout(on_desktop=on_desktop)
 
     def _ensure_cover(self):
         size = self._cover_size()
@@ -429,14 +526,12 @@ class MediaWidget:
         c.delete('all')
         self._btn_rects.clear()
 
-        # 背景
         if style == '圆角胶囊':
             rad = round(self.prefs['radius'] * k)
             self._draw_rounded_rect(c, 1, 1, w - 1, h - 1, rad, fill=bg, outline=CARD_BORDER)
         elif style == '方形卡片':
             c.create_rectangle(1, 1, w - 1, h - 1, fill=bg, outline=CARD_BORDER)
 
-        # 封面
         cx, cy = pad, pad
         if self._cover_photo is not None:
             c.create_image(cx, cy, anchor='nw', image=self._cover_photo)
@@ -446,37 +541,42 @@ class MediaWidget:
             c.create_text(cx + cover // 2, cy + cover // 2, text='♫',
                           fill=accent, font=('Segoe UI Symbol', max(14, round(20 * k))))
 
-        # 播放状态指示点
         dot_r = max(4, round(5 * k))
         dot_color = accent if self._state['playing'] else ACCENT_PAUSE
         c.create_oval(cx + cover - dot_r * 2 - 1, cy + cover - dot_r * 2 - 1,
                       cx + cover - 1, cy + cover - 1,
                       fill=dot_color, outline=bg if style != '极简透明' else KEY_COLOR, width=2)
 
-        def draw_text(x, y, text, font_spec, fill, anchor='nw'):
+        def draw_text(x, y, text, font_obj, fill, anchor='nw'):
             if style == '极简透明':
-                c.create_text(x + 1, y + 1, anchor=anchor, text=text, fill='#0b0f19', font=font_spec)
-            c.create_text(x, y, anchor=anchor, text=text, fill=fill, font=font_spec)
+                c.create_text(x + 1, y + 1, anchor=anchor, text=text, fill='#0b0f19', font=font_obj)
+            c.create_text(x, y, anchor=anchor, text=text, fill=fill, font=font_obj)
 
-        # 展开区域：歌名与歌手
+        # 先算右侧按钮区域左边界，保证歌名/歌手按真实像素宽度严格裁切、绝不与按钮重合
+        step = max(24, round(27 * k))
+        right_margin = max(16, round(18 * k))
+        hit = max(11, step // 2)
+        btn_left_edge = w - right_margin - step * 3 - hit - max(10, round(10 * k))
+
         if self._progress > 0.35:
             tx = cx + cover + max(8, round(10 * k))
-            title_pt = max(9, round(10.5 * k))
-            artist_pt = max(8, round(8.5 * k))
-            title = truncate_text(self._state['title'] or '未命名曲目', 14)
-            artist = truncate_text(self._state['artist'] or '正在播放', 16)
-            draw_text(tx, round(h * 0.22), title, ('Microsoft YaHei UI', title_pt, 'bold'), fg)
-            draw_text(tx, round(h * 0.56), artist, ('Microsoft YaHei UI', artist_pt),
-                      TEXT_SECONDARY if style != '极简透明' else fg)
+            avail_w = (btn_left_edge if self._progress > 0.82 else (w - pad - 4)) - tx
+            if avail_w > 16:
+                title_pt = max(9, round(10.5 * k))
+                artist_pt = max(8, round(8.5 * k))
+                self._ensure_fonts(title_pt, artist_pt)
+                title = fit_text_width(self._state['title'] or '未命名曲目', self._title_font.measure, avail_w)
+                artist = fit_text_width(self._state['artist'] or '正在播放', self._artist_font.measure, avail_w)
+                if title:
+                    draw_text(tx, round(h * 0.21), title, self._title_font, fg)
+                if artist:
+                    draw_text(tx, round(h * 0.57), artist, self._artist_font,
+                              TEXT_SECONDARY if style != '极简透明' else fg)
 
-        # 右侧控制按钮
         if self._progress > 0.82:
             play_icon = '⏸' if self._state['playing'] else '▶'
             pin_color = accent if self.locked else TEXT_SECONDARY
-            btn_pt = max(10, round(11 * k))
-            step = max(22, round(26 * k))
-            right_margin = max(16, round(18 * k))
-            hit = max(11, step // 2)
+            btn_font = ('Segoe UI Symbol', max(10, round(11 * k)))
             buttons = [
                 ('prev', '⏮', w - right_margin - step * 3, fg),
                 ('toggle', play_icon, w - right_margin - step * 2, fg),
@@ -484,7 +584,7 @@ class MediaWidget:
                 ('pin', '📌', w - right_margin, pin_color),
             ]
             for action, sym, bx, color in buttons:
-                draw_text(bx, h // 2, sym, ('Segoe UI Symbol', btn_pt), color, anchor='center')
+                draw_text(bx, h // 2, sym, btn_font, color, anchor='center')
                 self._btn_rects[action] = (bx - hit, max(6, h // 6), bx + hit, h - max(6, h // 6))
 
     # ------------------------------------------------------------ 快捷滚轮与设置弹窗
@@ -506,7 +606,7 @@ class MediaWidget:
             if self.dialog and self.dialog.winfo_exists() and 'scale' in self._dlg_vars:
                 self._dlg_vars['scale'].set(val)
             self._render()
-            self.relayout()
+            self.relayout(on_desktop=True)
             self._show_hint(f'大小 {val}%')
         else:
             val = max(35, min(100, self.prefs['opacity'] + direction * 5))
@@ -519,20 +619,20 @@ class MediaWidget:
         return 'break'
 
     def open_settings(self):
-        """打开音乐胶囊专属外观与行为设置窗口（修改实时生效）。"""
+        """打开音乐胶囊与同步歌词专属设置窗口（修改实时生效）。"""
         if self.dialog and self.dialog.winfo_exists():
             self.dialog.lift()
             return
         w = tk.Toplevel(self.root)
         self.dialog = w
-        w.title('桌面音乐胶囊设置')
+        w.title('桌面音乐胶囊与歌词设置')
         ui = max(1.0, getattr(self.widgets, 'ui_scale', 1.0))
-        w.geometry(f'{round(470 * ui)}x{round(460 * ui)}')
-        w.minsize(420, 410)
+        w.geometry(f'{round(500 * ui)}x{min(round(650 * ui), w.winfo_screenheight() - 60)}')
+        w.minsize(450, 560)
         pane = ttk.Frame(w, padding=16)
         pane.pack(fill='both', expand=True)
-        ttk.Label(pane, text='音乐胶囊外观与行为 · 修改立即生效',
-                  font=('Microsoft YaHei UI', 12)).pack(anchor='w', pady=(0, 10))
+        ttk.Label(pane, text='音乐胶囊与同步歌词 · 修改立即生效',
+                  font=('Microsoft YaHei UI', 12)).pack(anchor='w', pady=(0, 8))
 
         box = ttk.Frame(pane)
         box.pack(fill='x')
@@ -547,17 +647,17 @@ class MediaWidget:
                     self.prefs[k] = var.get()
             self.prefs = sanitize_media_prefs(self.prefs)
             self._render()
-            self.relayout()
+            self.relayout(on_desktop=True)
             self.widgets.queue_save()
 
         def row(label):
             f = ttk.Frame(box)
-            f.pack(fill='x', pady=4)
-            ttk.Label(f, text=label, width=14).pack(side='left')
+            f.pack(fill='x', pady=3)
+            ttk.Label(f, text=label, width=15).pack(side='left')
             return f
 
         for key, label, lo, hi in (
-            ('scale', '大小缩放(%)', 80, 220),
+            ('scale', '胶囊大小(%)', 80, 220),
             ('opacity', '不透明度(%)', 35, 100),
             ('radius', '圆角半径', 4, 32),
             ('pause_hide', '暂停隐藏(秒,0不藏)', 0, 60),
@@ -583,16 +683,34 @@ class MediaWidget:
         ttk.Button(colors, text='文字色', command=lambda: pick_color('fg', '选择文字色')).pack(side='left', padx=3)
         ttk.Button(colors, text='强调色', command=lambda: pick_color('accent', '选择强调色')).pack(side='left', padx=3)
 
-        checks = ttk.Frame(pane)
-        checks.pack(fill='x', pady=(10, 6))
-        ttk.Checkbutton(checks, text='启用桌面音乐胶囊', variable=self.enabled,
-                        command=self.on_save).pack(side='left', padx=(0, 12))
-        lock_var = vars_['locked'] = tk.BooleanVar(value=self.locked)
-        ttk.Checkbutton(checks, text='常驻展开（不自动收起）', variable=lock_var,
-                        command=apply).pack(side='left')
+        ttk.Separator(box, orient='horizontal').pack(fill='x', pady=8)
 
-        ttk.Label(pane, text='提示：在音乐胶囊上 Ctrl+滚轮调大小 · 滚轮调透明度 · 双击锁定展开 · 左键拖动位置',
-                  foreground='#64748B').pack(anchor='w', pady=(6, 12))
+        l_checks = ttk.Frame(box)
+        l_checks.pack(fill='x', pady=2)
+        lyr_en = vars_['lyrics_enabled'] = tk.BooleanVar(value=self.prefs['lyrics_enabled'])
+        ttk.Checkbutton(l_checks, text='启用桌面同步歌词', variable=lyr_en, command=apply).pack(side='left', padx=(0, 14))
+        lock_var = vars_['locked'] = tk.BooleanVar(value=self.locked)
+        ttk.Checkbutton(l_checks, text='胶囊常驻展开', variable=lock_var, command=apply).pack(side='left')
+
+        for key, label, values in (
+            ('lyrics_mode', '歌词位置', list(LYRICS_MODES)),
+            ('lyrics_lines', '歌词行数', list(LYRICS_LINE_OPTIONS)),
+        ):
+            var = vars_[key] = tk.StringVar(value=self.prefs[key])
+            cbox = ttk.Combobox(row(label), textvariable=var, values=values, state='readonly', width=22)
+            cbox.pack(side='left')
+            cbox.bind('<<ComboboxSelected>>', apply)
+
+        lsize = vars_['lyrics_size'] = tk.IntVar(value=self.prefs['lyrics_size'])
+        tk.Scale(row('歌词字号'), from_=14, to=42, orient='horizontal', variable=lsize,
+                 command=apply, showvalue=True, length=240).pack(side='left', fill='x', expand=True)
+
+        loff = vars_['lyrics_offset'] = tk.DoubleVar(value=self.prefs['lyrics_offset'])
+        tk.Scale(row('歌词时间偏移(秒)'), from_=-3.0, to=3.0, resolution=0.2, orient='horizontal',
+                 variable=loff, command=apply, showvalue=True, length=240).pack(side='left', fill='x', expand=True)
+
+        ttk.Label(pane, text='提示：Ctrl+滚轮调大小 · 滚轮调透明度 · 双击锁定展开 · 独立歌词条可直接拖动',
+                  foreground='#64748B').pack(anchor='w', pady=(8, 10))
 
         btns = ttk.Frame(pane)
         btns.pack(fill='x')
@@ -648,7 +766,9 @@ class MediaWidget:
                                   e.y_root - self._drag_offset[1],
                                   self._current_width(), self._card_h(), margin=8)
         self.pos = [x, y]
-        user32.SetWindowPos(self.hwnd, HWND_BOTTOM, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+        place_on_desktop(self.hwnd, x, y, on_desktop=True)
+        if self.prefs['lyrics_mode'] == '紧贴胶囊下方':
+            self.lyrics.relayout(on_desktop=True)
 
     def _on_release(self, e):
         was_drag = self._dragging
@@ -670,10 +790,12 @@ class MediaWidget:
             self.worker.send(action)
 
     # ------------------------------------------------------------ 主循环调度
-    def tick(self, now, blocked, icons_visible):
+    def tick(self, now, blocked, icons_visible, on_desktop=False, force_restack=False):
         if not self.enabled.get() or not HAS_WINRT:
             if self.win.winfo_viewable():
                 self.win.withdraw()
+            if self.lyrics.win.winfo_viewable():
+                self.lyrics.win.withdraw()
             return
         self.worker.start()
 
@@ -687,8 +809,9 @@ class MediaWidget:
             else:
                 self._paused_since = None
             self._render()
+        else:
+            self._state = st
 
-        # 延迟收起
         if not self._hover and not self.locked and self._target > 0.5:
             if self._leave_at and now - self._leave_at >= HOVER_LINGER:
                 self._start_anim(0.0)
@@ -709,12 +832,15 @@ class MediaWidget:
         )
         visible = bool(self.win.winfo_viewable())
         if should_show:
-            if not visible:
+            if not visible or force_restack:
                 x, y = resolve_anchor(self.anchor, self.pos, self._current_width(), self._card_h(), margin=8)
                 self.pos = [x, y]
-                self.win.geometry(f'{x:+d}{y:+d}')
-                self._render()
-                user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
-                user32.SetWindowPos(self.hwnd, HWND_BOTTOM, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+                if not visible:
+                    self.win.geometry(f'{x:+d}{y:+d}')
+                    self._render()
+                place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop, show=True)
         elif visible:
             self.win.withdraw()
+
+        self.lyrics.tick(self._state, self.worker.estimated_position(now), should_show,
+                         on_desktop=on_desktop, force_restack=force_restack)
