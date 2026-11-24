@@ -27,13 +27,18 @@ ole32 = ctypes.WinDLL('ole32')
 oleaut32 = ctypes.WinDLL('oleaut32')
 oleacc = ctypes.WinDLL('oleacc')
 dwmapi = ctypes.WinDLL('dwmapi')
+iphlpapi = ctypes.WinDLL('iphlpapi')
+ws2_32 = ctypes.WinDLL('ws2_32')
 
 # ---------------------------------------------------------------- 常量
 # 窗口样式与位置
+GWL_STYLE = -16
 GWL_EXSTYLE = -20
 GWLP_WNDPROC = -4
+WS_CAPTION = 0x00C00000              # 标题栏（用于区分普通最大化窗口与真正全屏）
 WS_EX_TOOLWINDOW = 0x00000080        # 不在任务栏 / Alt+Tab 中出现
 WS_EX_NOACTIVATE = 0x08000000        # 点击不抢焦点
+DWMWA_EXTENDED_FRAME_BOUNDS = 9      # DWM 真实可见窗口边界（不含隐形阴影）
 HWND_TOPMOST = -1
 HWND_BOTTOM = 1
 SWP_NOSIZE = 0x0001
@@ -55,6 +60,9 @@ VK_MENU = 0x12                       # Alt
 VK_H = 0x48
 VK_T = 0x54
 KEY_DOWN = 0x8000
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_NOREPEAT = 0x4000
 
 # 消息
 WM_NULL = 0x0000
@@ -64,6 +72,7 @@ WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
 WM_POWERBROADCAST = 0x0218
 WM_WTSSESSION_CHANGE = 0x02B1
+WM_HOTKEY = 0x0312
 WM_APP = 0x8000
 PBT_APMRESUMESUSPEND = 7
 PBT_APMRESUMEAUTOMATIC = 18
@@ -146,6 +155,49 @@ class VARIANT(ctypes.Structure):
                 ('payload', ctypes.c_void_p * 2)]
 
 
+class IpOptionInformation(ctypes.Structure):
+    _fields_ = [
+        ('ttl', ctypes.c_ubyte), ('tos', ctypes.c_ubyte), ('flags', ctypes.c_ubyte),
+        ('options_size', ctypes.c_ubyte), ('options_data', ctypes.c_void_p),
+    ]
+
+
+class IcmpEchoReply(ctypes.Structure):
+    _fields_ = [
+        ('address', ctypes.c_uint32), ('status', ctypes.c_uint32), ('rtt', ctypes.c_uint32),
+        ('data_size', ctypes.c_uint16), ('reserved', ctypes.c_uint16),
+        ('data', ctypes.c_void_p), ('options', IpOptionInformation),
+    ]
+
+
+class Memory(ctypes.Structure):
+    _fields_ = [('length', wintypes.DWORD), ('load', wintypes.DWORD), ('sizes', ctypes.c_uint64 * 7)]
+
+
+class Interface(ctypes.Structure):
+    # 对应 Windows SDK netioapi.h 中的 MIB_IF_ROW2；
+    # InterfaceAndOperStatusFlags 为 8 个 BOOLEAN 1-bit 位域（共 1 字节），bit 0 为 HardwareInterface
+    _fields_ = [
+        ('luid', ctypes.c_uint64), ('index', wintypes.DWORD), ('guid', ctypes.c_byte * 16),
+        ('alias', wintypes.WCHAR * 257), ('description', wintypes.WCHAR * 257),
+        ('address_len', wintypes.DWORD), ('address', ctypes.c_byte * 32), ('permanent', ctypes.c_byte * 32),
+        ('mtu', wintypes.DWORD), ('kind', wintypes.DWORD), ('tunnel', wintypes.DWORD), ('media', wintypes.DWORD),
+        ('physical_medium', wintypes.DWORD), ('access', wintypes.DWORD), ('direction', wintypes.DWORD),
+        ('flags', ctypes.c_ubyte), ('oper', wintypes.DWORD), ('admin', wintypes.DWORD), ('connected', wintypes.DWORD),
+        ('network_guid', ctypes.c_byte * 16), ('connection', wintypes.DWORD),
+        ('tx_speed', ctypes.c_uint64), ('rx_speed', ctypes.c_uint64),
+        ('received', ctypes.c_uint64), ('in_stats', ctypes.c_uint64 * 8),
+        ('sent', ctypes.c_uint64), ('out_stats', ctypes.c_uint64 * 8),
+    ]
+
+
+assert ctypes.sizeof(Interface) == 1352, f'MIB_IF_ROW2 大小不匹配: {ctypes.sizeof(Interface)}'
+
+
+class InterfaceTable(ctypes.Structure):
+    _fields_ = [('count', wintypes.DWORD), ('first', Interface)]
+
+
 # ---------------------------------------------------------------- 回调类型
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
@@ -200,6 +252,8 @@ _sig(user32.SendMessageTimeoutW, LRESULT, HWND, UINT, wintypes.WPARAM, wintypes.
      UINT, UINT, ctypes.POINTER(ctypes.c_size_t))
 _sig(user32.MessageBoxW, INT, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, UINT)
 _sig(user32.PostMessageW, BOOL, HWND, UINT, wintypes.WPARAM, wintypes.LPARAM)
+_sig(user32.RegisterHotKey, BOOL, HWND, INT, UINT, UINT)
+_sig(user32.UnregisterHotKey, BOOL, HWND, INT)
 
 try:
     GetWindowLongPtr = _sig(user32.GetWindowLongPtrW, LONG_PTR, HWND, INT)
@@ -218,6 +272,9 @@ _sig(kernel32.CloseHandle, BOOL, H)
 _sig(kernel32.WaitForSingleObject, DWORD, H, DWORD)
 _sig(kernel32.GetTickCount, DWORD)
 _sig(kernel32.GetStdHandle, H, DWORD)
+_sig(kernel32.GetSystemTimes, BOOL, ctypes.POINTER(wintypes.FILETIME),
+     ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME))
+_sig(kernel32.GlobalMemoryStatusEx, BOOL, ctypes.POINTER(Memory))
 
 # ---------------------------------------------------------------- gdi32
 _sig(gdi32.GetStockObject, wintypes.HGDIOBJ, INT)
@@ -241,6 +298,15 @@ _sig(oleaut32.VariantClear, HRESULT, ctypes.POINTER(VARIANT))
 _sig(oleacc.AccessibleObjectFromPoint, HRESULT, POINT, ctypes.POINTER(ctypes.c_void_p),
      ctypes.POINTER(VARIANT))
 _sig(dwmapi.DwmGetColorizationColor, HRESULT, ctypes.POINTER(DWORD), ctypes.POINTER(BOOL))
+_sig(dwmapi.DwmGetWindowAttribute, HRESULT, HWND, DWORD, wintypes.LPVOID, DWORD)
+_sig(iphlpapi.GetIfTable2, DWORD, ctypes.POINTER(ctypes.POINTER(InterfaceTable)))
+_sig(iphlpapi.FreeMibTable, None, ctypes.c_void_p)
+_sig(iphlpapi.IcmpCreateFile, ctypes.c_void_p)
+_sig(iphlpapi.IcmpCloseHandle, BOOL, ctypes.c_void_p)
+_sig(iphlpapi.IcmpSendEcho, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+     ctypes.c_void_p, ctypes.c_uint16, ctypes.c_void_p, ctypes.c_void_p,
+     ctypes.c_uint32, ctypes.c_uint32)
+_sig(ws2_32.inet_addr, ctypes.c_uint32, ctypes.c_char_p)
 
 
 # ---------------------------------------------------------------- 小工具

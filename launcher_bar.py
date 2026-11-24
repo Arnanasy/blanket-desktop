@@ -86,9 +86,22 @@ class LauncherBar:
                 child.configure(fg=accent)
 
     # ------------------------------------------------------------ 操作
+    def _reposition(self, anchor_x, anchor_y):
+        """按所在显示器工作区重新计算启动栏尺寸并贴右边缘居中定位。"""
+        wl, wt, wr, wb = bounds(anchor_x, anchor_y, work=True)
+        width = max(self.win.winfo_reqwidth(), round(260 * self.widgets.ui_scale))
+        height = min(self.win.winfo_reqheight(), wb - wt)
+        self.win.geometry(f'{width}x{height}+{wr - width}+{wt + max(0, (wb - wt - height) // 2)}')
+
+    def _refresh_if_visible(self):
+        if self.win.winfo_viewable():
+            self._reposition(self.win.winfo_x() + self.win.winfo_width() // 2,
+                             self.win.winfo_y() + self.win.winfo_height() // 2)
+
     def fold(self, name):
         self.expanded.symmetric_difference_update({name})
         self.render()
+        self._refresh_if_visible()
 
     def add(self, name, folder):
         self.busy = True
@@ -98,6 +111,7 @@ class LauncherBar:
                 self.groups[name].append(path)
                 self.widgets.save()
                 self.render()
+                self._refresh_if_visible()
         finally:
             self.app.discard_mouse()
             self.busy = False
@@ -109,15 +123,25 @@ class LauncherBar:
             items.remove(path)
             self.widgets.save()
             self.render()
+            self._refresh_if_visible()
+
+    def _show_error(self, message):
+        self.busy = True
+        try:
+            messagebox.showerror('无法打开', message, parent=self.win)
+        finally:
+            self.app.discard_mouse()
+            self.busy = False
+            self.last_inside = time.monotonic()
 
     def open(self, path):
         if not os.path.exists(path):
-            messagebox.showerror('无法打开', f'路径不存在：{path}', parent=self.win)
+            self._show_error(f'路径不存在：{path}')
             return
         try:
             os.startfile(path)
         except OSError as e:
-            messagebox.showerror('无法打开', str(e), parent=self.win)
+            self._show_error(str(e))
             return
         key = os.path.normcase(path)
         self.recent = ([path] + [p for p in self.recent if os.path.normcase(p) != key])[:MAX_RECENT]
@@ -139,10 +163,7 @@ class LauncherBar:
 
         opened = False
         if edge and now - self.edge_since >= OPEN_DELAY:
-            wl, wt, wr, wb = bounds(p.x, p.y, work=True)
-            width = max(self.win.winfo_reqwidth(), round(260 * self.widgets.ui_scale))
-            height = min(self.win.winfo_reqheight(), wb - wt)
-            self.win.geometry(f'{width}x{height}+{wr - width}+{wt + max(0, (wb - wt - height) // 2)}')
+            self._reposition(p.x, p.y)
             if not self.win.winfo_viewable():
                 self.win.deiconify()
                 opened = True

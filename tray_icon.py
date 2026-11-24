@@ -5,15 +5,18 @@ import queue
 
 from win32 import (user32, gdi32, shell32, NOTIFYICONDATAW, ICONINFO, WNDPROC, SetWindowLongPtr,
                    GWLP_WNDPROC, WM_NULL, WM_APP, WM_LBUTTONUP, WM_RBUTTONUP, WM_DISPLAYCHANGE,
-                   WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, PBT_APMRESUMESUSPEND,
+                   WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WM_HOTKEY, PBT_APMRESUMESUSPEND,
                    PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK, NIM_ADD, NIM_DELETE, NIF_MESSAGE,
                    NIF_ICON, NIF_TIP, TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, MF_STRING,
-                   IMAGE_ICON, LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON, SM_CYSMICON, cursor_pos)
+                   IMAGE_ICON, LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON, SM_CYSMICON, MOD_ALT,
+                   MOD_CONTROL, MOD_NOREPEAT, VK_H, VK_T, cursor_pos)
 
 WM_TRAY = WM_APP + 1
 IDM_OPEN = 2001
 IDM_QUIT = 2002
 IDM_THEME = 2003
+HOTKEY_ICONS = 1
+HOTKEY_THEME = 2
 TRAY_ICON_ID = 1
 ICON_FILE = Path(__file__).with_name('时隙.ico')
 
@@ -30,6 +33,9 @@ class TrayIcon:
         self.on_resume = lambda: None
         self.menu_closed = lambda: None
         self.on_theme = None
+        self.on_hotkey_icons = None
+        self.on_hotkey_theme = None
+        self.hotkeys_registered = set()
         # WNDPROC 处于 Tcl DispatchMessage 重入栈内，绝不能直接调 Tk 的 after/after_idle；
         # 只把事件放进纯 Python 队列，由主循环在正常 Tk 上下文里调用 process_events() 消费。
         self._events = queue.SimpleQueue()
@@ -77,6 +83,11 @@ class TrayIcon:
                                        user32.GetSystemMetrics(SM_CYSMICON),
                                        LR_LOADFROMFILE) or self._make_icon()
         self._add_icon()
+        # 优先使用系统原生 RegisterHotKey（零漏检且不向前台软件透传）；被占用时由主循环回退轮询
+        mods = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT
+        for hk_id, vk in ((HOTKEY_ICONS, VK_H), (HOTKEY_THEME, VK_T)):
+            if user32.RegisterHotKey(self.hwnd, hk_id, mods, vk):
+                self.hotkeys_registered.add(hk_id)
 
     def _base_data(self):
         nid = NOTIFYICONDATAW()
@@ -139,8 +150,19 @@ class TrayIcon:
                 self._show_menu()
             elif event == 'resume':
                 self.on_resume()
+            elif event == 'hotkey_icons' and self.on_hotkey_icons:
+                self.on_hotkey_icons()
+            elif event == 'hotkey_theme' and self.on_hotkey_theme:
+                self.on_hotkey_theme()
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
+        if msg == WM_HOTKEY:
+            if wparam == HOTKEY_ICONS:
+                self._events.put('hotkey_icons')
+                return 0
+            if wparam == HOTKEY_THEME:
+                self._events.put('hotkey_theme')
+                return 0
         resumed = ((msg == WM_WTSSESSION_CHANGE and wparam == WTS_SESSION_UNLOCK)
                    or (msg == WM_POWERBROADCAST and wparam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC))
                    or msg == WM_DISPLAYCHANGE)
@@ -162,6 +184,9 @@ class TrayIcon:
         return user32.CallWindowProcW(self._old_proc, hwnd, msg, wparam, lparam)
 
     def destroy(self):
+        for hk_id in list(self.hotkeys_registered):
+            user32.UnregisterHotKey(self.hwnd, hk_id)
+        self.hotkeys_registered.clear()
         shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._base_data()))
         if self._old_proc is not None:
             SetWindowLongPtr(self.hwnd, GWLP_WNDPROC, self._old_proc)

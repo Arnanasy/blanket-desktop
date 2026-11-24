@@ -11,7 +11,7 @@ folder = Path(__file__).resolve().parent
 sys.path.insert(0, str(folder))
 
 log = logging.getLogger('desktop')
-log.setLevel(logging.ERROR)
+log.setLevel(logging.WARNING)
 handler = RotatingFileHandler(
     folder / '净桌面错误.log',
     maxBytes=512000,
@@ -19,7 +19,7 @@ handler = RotatingFileHandler(
     delay=True,
     encoding='utf-8',
 )
-handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
 log.addHandler(handler)
 
 _notified = False            # 单次运行最多弹窗提醒一次，防止轮询异常引发弹窗风暴

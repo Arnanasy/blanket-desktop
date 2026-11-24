@@ -23,12 +23,24 @@ def watch(stream, recover):
     recover()
 
 
+def _log_recovery_failure(last_state):
+    try:
+        log_path = Path(__file__).resolve().parent / '净桌面错误.log'
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(f'{stamp} [WARNING] 异常退出守护重试 15 秒后仍未能恢复桌面图标 (last_state={last_state})\n')
+    except OSError:
+        pass
+
+
 def recover_icons():
     from desktop_windows import icons_visible, set_icons_visible
     from preferences import load_config, save_config
 
+    last_state = None
     for _ in range(30):
         state = icons_visible()
+        last_state = state
         if state is False:
             set_icons_visible(True)
         if icons_visible() is True:
@@ -37,6 +49,7 @@ def recover_icons():
             save_config(config)
             return
         time.sleep(0.5)
+    _log_recovery_failure(last_state)
 
 
 if __name__ == '__main__' and sys.argv[1:] == ['--watch']:

@@ -1,9 +1,12 @@
 """Windows 深色/浅色主题一键切换。修改注册表并广播通知，应用和浏览器同时生效。"""
 import ctypes
+import logging
 from threading import Thread
 import winreg
 
 from win32 import user32, HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG
+
+log = logging.getLogger('desktop')
 
 _KEY = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize'
 
@@ -34,8 +37,10 @@ def set_theme(dark):
 
 def _notify():
     result = ctypes.c_size_t()
-    user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 'ImmersiveColorSet',
-                               SMTO_ABORTIFHUNG, 1000, ctypes.byref(result))
+    ok = user32.SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 'ImmersiveColorSet',
+                                    SMTO_ABORTIFHUNG, 1000, ctypes.byref(result))
+    if not ok:
+        log.warning('主题切换广播失败或超时 (err=%s)', ctypes.get_last_error())
 
 
 def toggle():

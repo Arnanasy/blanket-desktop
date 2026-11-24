@@ -4,7 +4,8 @@ import ctypes
 from display_geometry import bounds
 from win32 import (user32, kernel32, ole32, oleaut32, oleacc, LASTINPUTINFO, POINT, VARIANT,
                    WNDENUMPROC, SW_HIDE, SW_SHOW, VK_LBUTTON, COINIT_APARTMENTTHREADED, S_OK,
-                   S_FALSE, RPC_E_CHANGED_MODE, VT_I4, ROLE_SYSTEM_LIST, key_down, cursor_pos)
+                   S_FALSE, RPC_E_CHANGED_MODE, VT_I4, ROLE_SYSTEM_LIST, key_down, cursor_pos,
+                   class_name)
 
 # 高 DPI 适配，避免高缩放下界面模糊；同时让 GetCursorPos 与屏幕尺寸自洽。
 # 必须在创建任何 Tk 窗口之前执行，因此放在模块导入时。
@@ -24,7 +25,10 @@ _desktop_cache = (None, None)
 def find_desktop_windows():
     """返回 (SHELLDLL_DefView, SysListView32) 句柄，找不到对应项为 None。结果会缓存。"""
     global _desktop_cache
-    if _desktop_cache[1] and user32.IsWindow(_desktop_cache[1]):
+    shell, lv = _desktop_cache
+    if (shell and lv and user32.IsWindow(shell) and user32.IsWindow(lv)
+            and class_name(shell) == 'SHELLDLL_DefView'
+            and class_name(lv) == 'SysListView32'):
         return _desktop_cache
     _desktop_cache = _find_desktop_windows()
     return _desktop_cache

@@ -19,13 +19,14 @@ sys.dont_write_bytecode = True
 import ctypes
 import time
 import tkinter as tk
+from pathlib import Path
 
 import desktop_recovery
 from desktop_widgets import Widgets
 from desktop_windows import (DesktopClick, get_cursor, icons_visible, set_icons_visible,
                              in_hotzone, input_idle_seconds, invalidate_cache)
 from preferences import load_config, save_config, autostart_enabled, set_autostart, repair_autostart
-from tray_icon import TrayIcon
+from tray_icon import TrayIcon, HOTKEY_ICONS, HOTKEY_THEME
 from win32 import (kernel32, wtsapi32, toplevel_hwnd, key_down, ERROR_ALREADY_EXISTS,
                    EVENT_MODIFY_STATE, WAIT_OBJECT_0, NOTIFY_FOR_THIS_SESSION,
                    VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_CONTROL, VK_MENU, VK_H, VK_T)
@@ -79,6 +80,10 @@ class App:
         self._dark = None
         self._quitting = False
         self.recovery_guard = None
+        try:
+            root.iconbitmap(default=str(Path(__file__).with_name('时隙.ico')))
+        except tk.TclError:
+            pass
         root.title('净桌面')
         root.configure(bg=BG)
         root.resizable(False, False)
@@ -90,9 +95,12 @@ class App:
         f_normal = ('Microsoft YaHei UI', 9)
         f_small = ('Microsoft YaHei UI', 8)
 
+        self.subtext_labels = set()
         tk.Label(root, text='净桌面', font=f_title, bg=BG, fg=TEXT).pack(pady=(18, 2))
-        tk.Label(root, text='鼠标移到屏幕边缘自动显示，移开只剩壁纸',
-                 font=f_sub, bg=BG, fg=SUBTEXT).pack(pady=(0, 12))
+        sub_label = tk.Label(root, text='鼠标移到屏幕边缘自动显示，移开只剩壁纸',
+                             font=f_sub, bg=BG, fg=SUBTEXT)
+        sub_label.pack(pady=(0, 12))
+        self.subtext_labels.add(sub_label)
 
         # 主切换按钮
         self.btn = tk.Button(root, text='立即隐藏', font=f_btn,
@@ -146,8 +154,10 @@ class App:
                            font=f_normal, bg=BG, fg=TEXT, activebackground=BG,
                            selectcolor=WHITE, command=self._persist).pack(side='left')
 
-        tk.Label(root, text='Ctrl+Alt+H 切换图标 · Ctrl+Alt+T 切换主题',
-                 font=f_small, bg=BG, fg=SUBTEXT).pack(pady=(10, 2))
+        hint_label = tk.Label(root, text='Ctrl+Alt+H 切换图标 · Ctrl+Alt+T 切换主题',
+                              font=f_small, bg=BG, fg=SUBTEXT)
+        hint_label.pack(pady=(10, 2))
+        self.subtext_labels.add(hint_label)
 
         actions = tk.Frame(root, bg=BG)
         actions.pack(fill='x', padx=24, pady=(6, 12))
@@ -187,6 +197,8 @@ class App:
         self.tray = TrayIcon(top_hwnd, self._tray_toggle, self._tray_open, self.quit_app)
         self.tray.on_resume = self.resume_desktop
         self.tray.on_theme = self.toggle_theme
+        self.tray.on_hotkey_icons = self.manual_toggle
+        self.tray.on_hotkey_theme = self.toggle_theme
         self.mouse_cutoff = 0
         self.tray.menu_closed = self.discard_mouse
         self.tray.install()
@@ -297,7 +309,7 @@ class App:
                 return  # 挂件窗口各自管理配色，不递归
             try:
                 if cls == 'Label':
-                    fg = sub if str(w.cget('fg')).lower() in ('#64748b', '#94a3b8') else text
+                    fg = sub if w in self.subtext_labels else text
                     w.configure(bg=bg, fg=fg)
                 elif cls in ('Frame', 'Canvas'):
                     w.configure(bg=bg)
@@ -390,6 +402,7 @@ class App:
         state = icons_visible()
         if state is not None:
             self.cfg['last_visible'] = state
+        self.widgets.monitor.cancel_save()
         self.widgets.save()          # 会一并保存 self.cfg
         self.widgets.worker.shutdown(wait=False, cancel_futures=True)
         wtsapi32.WTSUnRegisterSessionNotification(self.tray.hwnd)
@@ -415,15 +428,22 @@ class App:
 
     # ------------------------------------------------------------ 快捷键
     def check_hotkey(self):
+        # 已通过 RegisterHotKey 注册的热键由系统事件分发，仅对被其他程序占用的热键回退轮询
+        need_icons = HOTKEY_ICONS not in self.tray.hotkeys_registered
+        need_theme = HOTKEY_THEME not in self.tray.hotkeys_registered
+        if not (need_icons or need_theme):
+            return
         combo = key_down(VK_CONTROL) and key_down(VK_MENU)
-        down = combo and key_down(VK_H)
-        if down and not self._hk_held:
-            self.manual_toggle()
-        self._hk_held = down
-        theme_down = combo and key_down(VK_T)
-        if theme_down and not self._theme_held:
-            self.toggle_theme()
-        self._theme_held = theme_down
+        if need_icons:
+            down = combo and key_down(VK_H)
+            if down and not self._hk_held:
+                self.manual_toggle()
+            self._hk_held = down
+        if need_theme:
+            theme_down = combo and key_down(VK_T)
+            if theme_down and not self._theme_held:
+                self.toggle_theme()
+            self._theme_held = theme_down
 
     # ------------------------------------------------------------ 主轮询
     def poll(self):
@@ -470,7 +490,7 @@ class App:
         # 记住最近状态供下次启动恢复；启动恢复完成前不覆盖，否则会冲掉要恢复的目标
         if vis is not None and not self._restoring and self.cfg.get('last_visible') != vis:
             self.cfg['last_visible'] = vis
-            save_config(self.cfg)
+            self.widgets.queue_save()
         if self._ui_state == vis:
             return
         self._ui_state = vis

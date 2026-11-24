@@ -9,6 +9,19 @@ from urllib.request import Request, urlopen
 
 CACHE_SECONDS = 900          # 天气缓存有效期（15 分钟）
 
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _today_cn_dates():
+    """返回当日中文日期的带/不带前导零两种格式（兼容中国天气网接口）。"""
+    tm = time.localtime()
+    return (
+        f'{tm.tm_year}年{tm.tm_mon}月{tm.tm_mday}日',
+        f'{tm.tm_year}年{tm.tm_mon:02d}月{tm.tm_mday:02d}日',
+    )
+
 LOCATION_SCRIPT = """
 Add-Type -AssemblyName System.Device
 $w = New-Object System.Device.Location.GeoCoordinateWatcher
@@ -79,7 +92,7 @@ def domestic_weather(previous):
     code = station[1]
     now = time.time()
     prev_updated = previous.get('updated', 0)
-    if previous.get('station') == code and isinstance(prev_updated, (int, float)) \
+    if previous.get('station') == code and _is_number(prev_updated) \
             and 0 <= now - prev_updated < CACHE_SECONDS:
         return previous
     raw = domestic_text(f'https://d1.weather.com.cn/sk_2d/{code}.html?_={int(now)}')
@@ -92,7 +105,7 @@ def domestic_weather(previous):
     try:
         forecast = json.loads(domestic_text(f'https://www.weather.com.cn/data/cityinfo/{code}.html'))['weatherinfo']
         # 该接口偶尔返回历史归档预报，仅当日匹配时才拼接高低温
-        if forecast.get('date_y') == time.strftime('%Y年%m月%d日'):
+        if forecast.get('date_y') in _today_cn_dates():
             line += f" · {forecast['temp1']}–{forecast['temp2']}"
     except (OSError, ValueError, KeyError, IndexError):
         pass
@@ -104,7 +117,7 @@ def global_weather(previous):
     lat, lon, place = location()
     now = time.time()
     prev_updated = previous.get('updated', 0)
-    if previous and previous.get('point') and isinstance(prev_updated, (int, float)) \
+    if previous and previous.get('point') and _is_number(prev_updated) \
             and 0 <= now - prev_updated < CACHE_SECONDS:
         a, b = previous['point']
         if math.hypot(lat - a, (lon - b) * math.cos(math.radians(lat))) < 0.07:
@@ -132,7 +145,7 @@ def global_weather(previous):
 def refresh(previous):
     previous = previous if isinstance(previous, dict) else {}
     updated = previous.get('updated', 0)
-    if previous.get('line') and isinstance(updated, (int, float)) and 0 <= time.time() - updated < CACHE_SECONDS:
+    if previous.get('line') and _is_number(updated) and 0 <= time.time() - updated < CACHE_SECONDS:
         return previous
     # 优先尝试国内接口（单次直连，无需启动 PowerShell 定位），非国内 IP 或失败再回退全球源
     try:

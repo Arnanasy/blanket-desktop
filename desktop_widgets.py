@@ -20,17 +20,23 @@ from preferences import save_config
 from sys_monitor import SystemMonitor
 from theme_button import ThemeButton
 from wallpaper_clock import sample
-from win32 import (user32, dwmapi, RECT, class_name, cursor_pos, toplevel_hwnd, add_exstyle,
-                   HWND_BOTTOM, SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER,
-                   SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, SM_XVIRTUALSCREEN,
-                   SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN)
+from win32 import (user32, dwmapi, RECT, GetWindowLongPtr, class_name, cursor_pos, toplevel_hwnd,
+                   add_exstyle, GWL_STYLE, WS_CAPTION, DWMWA_EXTENDED_FRAME_BOUNDS, HWND_BOTTOM,
+                   SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE,
+                   WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                   SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN)
 
 KEY_COLOR = '#010203'          # 透明色键
 TICK_MS = 150
 THEME_CHECK_SECONDS = 30       # 系统强调色 / 深浅色的检查间隔
 SNAP = 18                      # 拖动时钟时吸附到边缘的距离
 SNAP_CENTER = 22               # 吸附到水平居中的距离
+DRAG_THRESHOLD = 5             # 位移超过此值才视为拖动，避免单击/双击误触发吸附
 DEFAULT_POSITION = [40, 70]
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 SHELL_CLASSES = ('Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd')
 STYLE_DEFAULTS = dict(size=52, date_size=18, font='Segoe UI', color='#FFFFFF', background='#18202D',
                       shape='透明', layout='上下排列', bold=False, date=True, seconds=False,
@@ -55,6 +61,8 @@ class Widgets:
         self.sampling = None
         self.sample_again = False
         self.offset = None
+        self._drag_origin = None
+        self._dragging = False
         self.save_timer = None
         self.hint_timer = None
         self.control_vars = {}
@@ -67,7 +75,7 @@ class Widgets:
         self.weather_on = tk.BooleanVar(value=self.cfg.get('weather_enabled', True))
         cached = self.cfg.get('weather_cache')
         valid = isinstance(cached, dict) and isinstance(cached.get('line'), str) \
-            and isinstance(cached.get('updated'), (int, float))
+            and _is_number(cached.get('updated'))
         self.weather = cached if valid else {}
         self.weather_status = '等待更新'
         self.weather_job = None
@@ -151,10 +159,14 @@ class Widgets:
                     pass
 
     def save(self):
+        if self.save_timer:
+            self.root.after_cancel(self.save_timer)
+            self.save_timer = None
         self.cfg['weather_enabled'] = self.weather_on.get()
         if self.weather:
             self.cfg['weather_cache'] = {k: self.weather[k] for k in
-                                         ('line', 'updated', 'place', 'source', 'station') if k in self.weather}
+                                         ('line', 'updated', 'place', 'source', 'station', 'point')
+                                         if k in self.weather}
         self.cfg.update(groups=self.bar.groups, clock=self.clock_on.get(), bar=self.bar.enabled.get(),
                         appearance=self.style, adaptive=self.adaptive.get(), recent=self.bar.recent,
                         wallpaper_palettes=self.palettes, theme_btn=self.theme_button.config())
@@ -202,7 +214,8 @@ class Widgets:
             city = self.weather.get('place')
             if city and city not in ('系统定位', '网络定位'):
                 weather = f'{city} · {weather}'
-            if self.weather and (self.weather_status == '更新失败' or time.time() - self.weather['updated'] > 1800):
+            if self.weather and (self.weather_status == '更新失败'
+                                 or not (0 <= time.time() - self.weather['updated'] <= 1800)):
                 weather += '（上次）'
         palette = self.palettes.get(self.palette) if self.adaptive.get() else None
         self.face.draw(canvas or self.clock_label, self.style, self.accent, palette, weather)
@@ -264,8 +277,9 @@ class Widgets:
         self.weather_tip.withdraw()
         self.weather_tip.overrideredirect(True)
         self.weather_tip.attributes('-topmost', True)
-        tk.Label(self.weather_tip, text=details + ' · ' + self.weather.get('source', 'Open-Meteo'),
-                 padx=5, pady=2).pack()
+        source = self.weather.get('source')
+        tip_text = f'{details} · {source}' if source else details
+        tk.Label(self.weather_tip, text=tip_text, padx=5, pady=2).pack()
         self.weather_tip.update_idletasks()
         tw, th = self.weather_tip.winfo_reqwidth(), self.weather_tip.winfo_reqheight()
         l, t, r, b = bounds(event.x_root, event.y_root, work=True)
@@ -285,7 +299,7 @@ class Widgets:
                     self.save()
                 # 与天气缓存有效期对齐：缓存过期时再去刷新，避免空跑
                 updated = result.get('updated', 0)
-                age = time.time() - updated if isinstance(updated, (int, float)) else CACHE_SECONDS
+                age = time.time() - updated if _is_number(updated) else CACHE_SECONDS
                 delay = max(60, min(CACHE_SECONDS, CACHE_SECONDS - age))
             except Exception:
                 self.weather_status = '更新失败'
@@ -440,14 +454,28 @@ class Widgets:
         self.cfg['position'] = [x, y]
 
     def drag_start(self, e):
+        self._drag_origin = (e.x_root, e.y_root)
+        self._dragging = False
         self.offset = (e.x_root - self.clock.winfo_x(), e.y_root - self.clock.winfo_y())
 
     def drag(self, e):
-        if self.offset is not None:
-            self.place_clock(e.x_root - self.offset[0], e.y_root - self.offset[1])
+        if self.offset is None or self._drag_origin is None:
+            return
+        if not self._dragging:
+            dx = abs(e.x_root - self._drag_origin[0])
+            dy = abs(e.y_root - self._drag_origin[1])
+            if dx + dy <= DRAG_THRESHOLD:
+                return
+            self._dragging = True
+        self.place_clock(e.x_root - self.offset[0], e.y_root - self.offset[1])
 
     def finish_drag(self):
+        was_dragging = self._dragging
         self.offset = None
+        self._drag_origin = None
+        self._dragging = False
+        if not was_dragging:
+            return
         self.place_clock(self.clock.winfo_x(), self.clock.winfo_y(), snap=True)
         user32.SetWindowPos(self.clock_hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
         self.save()
@@ -467,8 +495,14 @@ class Widgets:
     def fullscreen_active(self, hwnd, name):
         if not hwnd or name in SHELL_CLASSES:
             return False
+        # 带标题栏的普通最大化窗口不算全屏（避免在自动隐藏任务栏或无任务栏副屏上误判）
+        if (GetWindowLongPtr(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION:
+            return False
         rect = RECT()
-        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        # 优先取 DWM 真实可见边界，排除 7~8px 的隐形缩放阴影边框
+        hr = dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                                          ctypes.byref(rect), ctypes.sizeof(rect))
+        if hr != 0 and not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
             return False
         l, t, r, b = bounds((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
         return rect.left <= l and rect.top <= t and rect.right >= r and rect.bottom >= b

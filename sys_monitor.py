@@ -6,80 +6,15 @@ from threading import Thread
 import tkinter as tk
 from tkinter import ttk, colorchooser, font
 
-from win32 import (user32, toplevel_hwnd, add_exstyle, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-                   SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
+from win32 import (user32, kernel32, iphlpapi, ws2_32, toplevel_hwnd, add_exstyle,
+                   HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, WS_EX_NOACTIVATE,
+                   WS_EX_TOOLWINDOW, INVALID_HANDLE_VALUE, IcmpEchoReply, Memory,
+                   Interface, InterfaceTable)
 
-DWORD = w.DWORD
 DEFAULT_PING_HOST = '223.5.5.5'
 PING_INTERVAL = 2.0          # Ping 采样间隔（秒），在后台线程执行不阻塞界面
 PING_TIMEOUT_MS = 1000
 NVML_TEMPERATURE_GPU = 0
-INVALID_HANDLE = c.c_void_p(-1).value
-
-
-class IpOptionInformation(c.Structure):
-    _fields_ = [
-        ('ttl', c.c_ubyte), ('tos', c.c_ubyte), ('flags', c.c_ubyte),
-        ('options_size', c.c_ubyte), ('options_data', c.c_void_p),
-    ]
-
-
-class IcmpEchoReply(c.Structure):
-    _fields_ = [
-        ('address', c.c_uint32), ('status', c.c_uint32), ('rtt', c.c_uint32),
-        ('data_size', c.c_uint16), ('reserved', c.c_uint16),
-        ('data', c.c_void_p), ('options', IpOptionInformation),
-    ]
-
-
-class Memory(c.Structure):
-    _fields_ = [('length', DWORD), ('load', DWORD), ('sizes', c.c_uint64 * 7)]
-
-
-class Interface(c.Structure):
-    # 对应 Windows SDK netioapi.h 中的 MIB_IF_ROW2；flags 的 bit 0 为 HardwareInterface
-    _fields_ = [
-        ('luid', c.c_uint64), ('index', DWORD), ('guid', c.c_byte * 16),
-        ('alias', w.WCHAR * 257), ('description', w.WCHAR * 257),
-        ('address_len', DWORD), ('address', c.c_byte * 32), ('permanent', c.c_byte * 32),
-        ('mtu', DWORD), ('kind', DWORD), ('tunnel', DWORD), ('media', DWORD),
-        ('physical_medium', DWORD), ('access', DWORD), ('direction', DWORD),
-        ('flags', c.c_ubyte), ('oper', DWORD), ('admin', DWORD), ('connected', DWORD),
-        ('network_guid', c.c_byte * 16), ('connection', DWORD),
-        ('tx_speed', c.c_uint64), ('rx_speed', c.c_uint64),
-        ('received', c.c_uint64), ('in_stats', c.c_uint64 * 8),
-        ('sent', c.c_uint64), ('out_stats', c.c_uint64 * 8),
-    ]
-
-
-class InterfaceTable(c.Structure):
-    _fields_ = [('count', DWORD), ('first', Interface)]
-
-
-# 使用私有 WinDLL 实例，不污染进程级 ctypes.windll 单例
-_kernel = c.WinDLL('kernel32')
-_kernel.GetSystemTimes.argtypes = [c.POINTER(w.FILETIME)] * 3
-_kernel.GetSystemTimes.restype = w.BOOL
-_kernel.GlobalMemoryStatusEx.argtypes = [c.POINTER(Memory)]
-_kernel.GlobalMemoryStatusEx.restype = w.BOOL
-
-_ip = c.WinDLL('iphlpapi')
-_ip.GetIfTable2.argtypes = [c.POINTER(c.POINTER(InterfaceTable))]
-_ip.GetIfTable2.restype = w.DWORD
-_ip.FreeMibTable.argtypes = [c.c_void_p]
-_ip.FreeMibTable.restype = None
-_ip.IcmpCreateFile.restype = c.c_void_p
-_ip.IcmpCloseHandle.argtypes = [c.c_void_p]
-_ip.IcmpCloseHandle.restype = w.BOOL
-_ip.IcmpSendEcho.argtypes = [
-    c.c_void_p, c.c_uint32, c.c_void_p, c.c_uint16,
-    c.c_void_p, c.c_void_p, c.c_uint32, c.c_uint32,
-]
-_ip.IcmpSendEcho.restype = c.c_uint32
-
-_ws2 = c.WinDLL('ws2_32')
-_ws2.inet_addr.argtypes = [c.c_char_p]
-_ws2.inet_addr.restype = c.c_uint32
 
 
 class GpuTempReader:
@@ -140,21 +75,21 @@ def ping_once(host):
         ip_str = socket.gethostbyname(target)
     except OSError:
         return None
-    addr = _ws2.inet_addr(ip_str.encode('ascii', 'ignore'))
+    addr = ws2_32.inet_addr(ip_str.encode('ascii', 'ignore'))
     if addr == 0xFFFFFFFF:
         return None
-    handle = _ip.IcmpCreateFile()
-    if not handle or handle == INVALID_HANDLE:
+    handle = iphlpapi.IcmpCreateFile()
+    if not handle or handle == INVALID_HANDLE_VALUE:
         return None
     try:
         buf = c.create_string_buffer(c.sizeof(IcmpEchoReply) + 64)
-        count = _ip.IcmpSendEcho(handle, addr, b'ping', 4, None, buf, len(buf), PING_TIMEOUT_MS)
+        count = iphlpapi.IcmpSendEcho(handle, addr, b'ping', 4, None, buf, len(buf), PING_TIMEOUT_MS)
         if not count:
             return None
         reply = IcmpEchoReply.from_buffer_copy(buf)
         return int(reply.rtt) if reply.status == 0 else None
     finally:
-        _ip.IcmpCloseHandle(handle)
+        iphlpapi.IcmpCloseHandle(handle)
 
 
 # MIB_IF_ROW2 物理网卡类型：以太网(6)、Wi-Fi(71)、WWAN(243/244)
@@ -165,7 +100,7 @@ VALID_SHAPES = ('圆角', '方形', '透明')
 
 def network():
     table = c.POINTER(InterfaceTable)()
-    if _ip.GetIfTable2(c.byref(table)):
+    if iphlpapi.GetIfTable2(c.byref(table)):
         return None
     try:
         rows = (Interface * table.contents.count).from_address(c.addressof(table.contents.first))
@@ -175,7 +110,7 @@ def network():
             if (row.flags & 1) and row.oper == 1 and row.kind in PHYSICAL_IF_TYPES
         }
     finally:
-        _ip.FreeMibTable(table)
+        iphlpapi.FreeMibTable(table)
 
 
 def speed(value):
@@ -195,7 +130,8 @@ class Sampler:
         self._ping_text = '—'
         self._ping_host = ''
         self._ping_at = 0.0
-        self._ping_busy = False
+        self._ping_seq = 0
+        self._ping_active_seq = None
 
     def _schedule_ping(self, host, now):
         target = (host or DEFAULT_PING_HOST).strip() or DEFAULT_PING_HOST
@@ -203,18 +139,21 @@ class Sampler:
             self._ping_host = target
             self._ping_text = '—'
             self._ping_at = 0.0
-        if self._ping_busy or now - self._ping_at < PING_INTERVAL:
+            self._ping_seq += 1
+        seq = self._ping_seq
+        if self._ping_active_seq == seq or now - self._ping_at < PING_INTERVAL:
             return
-        self._ping_busy = True
+        self._ping_active_seq = seq
         self._ping_at = now
 
         def worker():
             try:
                 rtt = ping_once(target)
-                if self._ping_host == target:
+                if self._ping_seq == seq:
                     self._ping_text = f'{rtt} ms' if rtt is not None else '超时'
             finally:
-                self._ping_busy = False
+                if self._ping_active_seq == seq:
+                    self._ping_active_seq = None
 
         Thread(target=worker, name='monitor-ping', daemon=True).start()
 
@@ -224,7 +163,7 @@ class Sampler:
         if cfg.get('cpu'):
             times = [w.FILETIME() for _ in range(3)]
             percent = '—'
-            if _kernel.GetSystemTimes(*(c.byref(t) for t in times)):
+            if kernel32.GetSystemTimes(*(c.byref(t) for t in times)):
                 idle, kernel_time, user = [(t.dwHighDateTime << 32) | t.dwLowDateTime for t in times]
                 total = kernel_time + user
                 if self.cpu and total > self.cpu[1]:
@@ -237,7 +176,7 @@ class Sampler:
 
         if cfg.get('memory'):
             mem = Memory(length=c.sizeof(Memory))
-            value = f'{mem.load}%' if _kernel.GlobalMemoryStatusEx(c.byref(mem)) else '—'
+            value = f'{mem.load}%' if kernel32.GlobalMemoryStatusEx(c.byref(mem)) else '—'
             readings['memory'] = '内存    ' + value
 
         if cfg.get('temp'):
@@ -402,6 +341,11 @@ class SystemMonitor:
         if self.save_timer is not None:
             self.win.after_cancel(self.save_timer)
         self.save_timer = self.win.after(300, self.flush_save)
+
+    def cancel_save(self):
+        if self.save_timer is not None:
+            self.win.after_cancel(self.save_timer)
+            self.save_timer = None
 
     def flush_save(self):
         self.save_timer = None
