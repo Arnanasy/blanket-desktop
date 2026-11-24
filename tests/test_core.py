@@ -274,6 +274,13 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         self.assertEqual(mw.truncate_text('短歌名', 10), '短歌名')
         self.assertEqual(len(mw.truncate_text('这是一首非常非常长的中文歌名测试', 8)), 8)
 
+        prefs = mw.sanitize_media_prefs({'scale': 999, 'opacity': 10, 'bg': 'bad', 'style': '未知', 'pause_hide': -5})
+        self.assertEqual(prefs['scale'], 220)
+        self.assertEqual(prefs['opacity'], 35)
+        self.assertEqual(prefs['bg'], mw.MEDIA_DEFAULTS['bg'])
+        self.assertEqual(prefs['style'], mw.MEDIA_DEFAULTS['style'])
+        self.assertEqual(prefs['pause_hide'], 0)
+
 
 if __name__ == '__main__':
     unittest.main()

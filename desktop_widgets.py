@@ -162,7 +162,7 @@ class Widgets:
         self.hide_weather_tip()
         self.media.close()
         for win in (self.clock, self.theme_button.win, self.bar.win, self.monitor.win,
-                    self.media.win, self.settings_window, self.monitor.dialog):
+                    self.media.win, self.media.dialog, self.settings_window, self.monitor.dialog):
             if win is not None:
                 try:
                     win.withdraw()
@@ -351,6 +351,7 @@ class Widgets:
         w.minsize(520, 550)
         toolbar = ttk.Frame(w)
         toolbar.pack(fill='x', padx=16, pady=(8, 0))
+        ttk.Button(toolbar, text='音乐胶囊设置…', command=self.media.open_settings).pack(side='left')
         ttk.Button(toolbar, text='退出净桌面', command=self.app.quit_app).pack(side='right')
         pane = ttk.Frame(w, padding=16)
         pane.pack(fill='both', expand=True)
