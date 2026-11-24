@@ -191,6 +191,18 @@ class TestMonitorAndWallpaper(unittest.TestCase):
         # InterfaceTable.first 必须 8 字节对齐（count 为 4 字节 + 4 字节填充）
         self.assertEqual(win32.InterfaceTable.first.offset, 8)
 
+    def test_sampler_ping_queue_ignores_stale_target(self):
+        sampler = sys_monitor.Sampler()
+        sampler._ping_host = '1.1.1.1'
+        sampler._ping_seq = 2
+        sampler._ping_active_seq = 2
+        # 模拟旧目标 (seq=1) 与当前目标 (seq=2) 依次回传
+        sampler._ping_results.put((1, 999))
+        sampler._ping_results.put((2, 18))
+        sampler._drain_ping_results()
+        self.assertEqual(sampler._ping_text, '18 ms')
+        self.assertIsNone(sampler._ping_active_seq)
+
     def test_wallpaper_sample_dark_light_and_edge_overlap(self):
         try:
             from PIL import Image

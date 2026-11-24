@@ -1,6 +1,7 @@
 """按需呼出的 Windows 系统性能监控挂件（无常驻轮询线程，按启用项采集）。"""
 import ctypes as c
 from ctypes import wintypes as w
+import queue
 import socket
 from threading import Thread
 import tkinter as tk
@@ -132,8 +133,22 @@ class Sampler:
         self._ping_at = 0.0
         self._ping_seq = 0
         self._ping_active_seq = None
+        self._ping_results = queue.SimpleQueue()
+
+    def _drain_ping_results(self):
+        """在主线程消费后台 Ping 线程回传的结果，避免跨线程直接改写实例属性。"""
+        while True:
+            try:
+                seq, rtt = self._ping_results.get_nowait()
+            except queue.Empty:
+                return
+            if seq == self._ping_seq:
+                self._ping_text = f'{rtt} ms' if rtt is not None else '超时'
+            if seq == self._ping_active_seq:
+                self._ping_active_seq = None
 
     def _schedule_ping(self, host, now):
+        self._drain_ping_results()
         target = (host or DEFAULT_PING_HOST).strip() or DEFAULT_PING_HOST
         if target != self._ping_host:
             self._ping_host = target
@@ -145,15 +160,14 @@ class Sampler:
             return
         self._ping_active_seq = seq
         self._ping_at = now
+        results = self._ping_results
 
         def worker():
             try:
                 rtt = ping_once(target)
-                if self._ping_seq == seq:
-                    self._ping_text = f'{rtt} ms' if rtt is not None else '超时'
-            finally:
-                if self._ping_active_seq == seq:
-                    self._ping_active_seq = None
+            except Exception:
+                rtt = None
+            results.put((seq, rtt))
 
         Thread(target=worker, name='monitor-ping', daemon=True).start()
 

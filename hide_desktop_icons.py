@@ -406,12 +406,15 @@ class App:
         self.widgets.save()          # 会一并保存 self.cfg
         self.widgets.worker.shutdown(wait=False, cancel_futures=True)
         wtsapi32.WTSUnRegisterSessionNotification(self.tray.hwnd)
-        # 退出前确保桌面图标恢复显示（异步触发，不阻塞等待资源管理器重绘）
+        # 退出前确保桌面图标恢复显示；仅在确认恢复成功后才通知守护进程撤退，
+        # 若资源管理器暂时无响应或恢复失败，留给守护进程在管道 EOF 后继续重试兜底
+        restored = state is True
         if state is False:
-            set_icons_visible(True, async_=True)
-        if (state is True or state is False) and self.recovery_guard:
+            restored = bool(set_icons_visible(True) and icons_visible() is True)
+        if self.recovery_guard:
             try:
-                self.recovery_guard.stdin.write(b'restored\n')
+                if restored:
+                    self.recovery_guard.stdin.write(b'restored\n')
                 self.recovery_guard.stdin.close()
             except OSError:
                 pass
