@@ -237,5 +237,43 @@ class TestMonitorAndWallpaper(unittest.TestCase):
             self.assertIsNone(run_with_wallpaper(light_img, (20, 0, 80, 40)))
 
 
+class TestClockExtrasAndLayout(unittest.TestCase):
+    def test_clock_and_date_formatting_and_addons(self):
+        from datetime import date, datetime
+        import clock_extras as ce
+
+        dt = datetime(2026, 11, 24, 20, 5, 9)
+        self.assertEqual(ce.format_clock_text(dt, seconds=False, hour12=False), '20:05')
+        self.assertEqual(ce.format_clock_text(dt, seconds=True, hour12=True), '08:05:09 PM')
+        self.assertEqual(ce.format_date_text(dt, fmt='yyyy/MM/dd  EEE', addon='无'), '2026/11/24  周二')
+        self.assertIn('射手座', ce.zodiac_text(date(2026, 11, 24)))
+        self.assertEqual(ce.lunar_date_text(date(2026, 2, 17)), '正月初一')
+        self.assertTrue(ce.solar_term_text(date(2026, 11, 24)))
+        self.assertIn('·', ce.format_date_text(dt, fmt='MM-dd', addon='农历·节气'))
+
+    def test_anchor_layout_cross_resolution_and_clamp(self):
+        import widget_layout as wl
+
+        # 在 2560x1440 右下区域保存锚点，切换到 1920x1080 时应按比例归位且不出界
+        anchor = wl.capture_anchor(2100, 1100, 200, 100, bounds_fn=lambda x, y, work=True: (0, 0, 2560, 1440))
+        nx, ny = wl.resolve_anchor(anchor, [2100, 1100], 200, 100, bounds_fn=lambda x, y, work=True: (0, 0, 1920, 1080))
+        self.assertTrue(0 <= nx <= 1720)
+        self.assertTrue(0 <= ny <= 980)
+        self.assertGreater(nx, 1200)
+
+        # 旧版无 anchor 时，越界坐标应被安全拉回屏幕内
+        cx, cy = wl.resolve_anchor(None, [5000, -200], 200, 100, bounds_fn=lambda x, y, work=True: (0, 0, 1920, 1080))
+        self.assertEqual((cx, cy), (1720, 0))
+
+    def test_media_widget_helpers(self):
+        import media_widget as mw
+
+        self.assertAlmostEqual(mw.ease_out_cubic(0.0), 0.0)
+        self.assertAlmostEqual(mw.ease_out_cubic(1.0), 1.0)
+        self.assertGreater(mw.ease_out_cubic(0.5), 0.8)
+        self.assertEqual(mw.truncate_text('短歌名', 10), '短歌名')
+        self.assertEqual(len(mw.truncate_text('这是一首非常非常长的中文歌名测试', 8)), 8)
+
+
 if __name__ == '__main__':
     unittest.main()

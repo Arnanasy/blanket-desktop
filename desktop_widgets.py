@@ -11,15 +11,19 @@ import time
 import tkinter as tk
 from tkinter import colorchooser, ttk, font as tkfont
 
+from clock_extras import (DATE_ADDON_OPTIONS, DATE_FORMAT_PRESETS, DEFAULT_DATE_FORMAT,
+                          format_clock_text, format_date_text)
 from clock_face import ClockFace
 from desktop_windows import invalidate_cache
 from display_geometry import bounds
 from launcher_bar import LauncherBar
 from local_weather import refresh as refresh_weather, CACHE_SECONDS
+from media_widget import MediaWidget
 from preferences import save_config
 from sys_monitor import SystemMonitor
 from theme_button import ThemeButton
 from wallpaper_clock import sample
+from widget_layout import AnchorRegistry, capture_anchor, resolve_anchor
 from win32 import (user32, dwmapi, RECT, GetWindowLongPtr, class_name, cursor_pos, toplevel_hwnd,
                    add_exstyle, GWL_STYLE, WS_CAPTION, DWMWA_EXTENDED_FRAME_BOUNDS, HWND_BOTTOM,
                    SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE,
@@ -40,6 +44,7 @@ def _is_number(value):
 SHELL_CLASSES = ('Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd')
 STYLE_DEFAULTS = dict(size=52, date_size=18, font='Segoe UI', color='#FFFFFF', background='#18202D',
                       shape='透明', layout='上下排列', bold=False, date=True, seconds=False,
+                      hour12=False, date_format=DEFAULT_DATE_FORMAT, date_addon='无',
                       follow=False, opacity=100, padding=20)
 STYLE_RANGES = [('size', 16, 160), ('date_size', 10, 60), ('opacity', 30, 100), ('padding', 5, 60)]
 
@@ -104,12 +109,17 @@ class Widgets:
         add_exstyle(self.clock_hwnd, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
         self.draw_clock()
 
-        # 其他挂件
+        # 其他挂件与统一锚点管理
+        self.anchors = AnchorRegistry()
         self.theme_button = ThemeButton(self.root, self.cfg.get('theme_btn', {}), self.ui_scale,
                                         on_toggle=self.app.toggle_theme, on_settings=self.settings,
                                         on_save=self.save)
         self.bar = LauncherBar(self, self.cfg)
         self.monitor = SystemMonitor(self, bounds)
+        self.media = MediaWidget(self, self.cfg.get('media', {}), on_save=self.save, on_settings=self.settings)
+        self.anchors.register(self._relayout_clock)
+        self.anchors.register(lambda: self.theme_button.place() if self.theme_button.visible() else None)
+        self.anchors.register(self.media.relayout)
         self.last_theme = 0
         self.last_clock = ''
         self.last_desktop_foreground = None
@@ -150,8 +160,9 @@ class Widgets:
     def hide_all(self):
         """退出时立即隐藏全部挂件和弹窗，做到点击即消失。"""
         self.hide_weather_tip()
+        self.media.close()
         for win in (self.clock, self.theme_button.win, self.bar.win, self.monitor.win,
-                    self.settings_window, self.monitor.dialog):
+                    self.media.win, self.settings_window, self.monitor.dialog):
             if win is not None:
                 try:
                     win.withdraw()
@@ -169,7 +180,8 @@ class Widgets:
                                          if k in self.weather}
         self.cfg.update(groups=self.bar.groups, clock=self.clock_on.get(), bar=self.bar.enabled.get(),
                         appearance=self.style, adaptive=self.adaptive.get(), recent=self.bar.recent,
-                        wallpaper_palettes=self.palettes, theme_btn=self.theme_button.config())
+                        wallpaper_palettes=self.palettes, theme_btn=self.theme_button.config(),
+                        media=self.media.config())
         save_config(self.app.cfg)
 
     def queue_save(self):
@@ -371,11 +383,19 @@ class Widgets:
             self._font_choices = [f for f in preferred if f in all_families] + [f for f in all_families if f not in preferred]
         for key, label, values in [('font', '字体', self._font_choices),
                                    ('shape', '形状', ['透明', '矩形卡片', '圆角卡片', '圆形']),
-                                   ('layout', '排列', ['上下排列', '左右排列'])]:
+                                   ('layout', '排列', ['上下排列', '左右排列']),
+                                   ('date_addon', '日期彩蛋', list(DATE_ADDON_OPTIONS))]:
             var = variables[key] = tk.StringVar(value=self.style[key])
             cb = ttk.Combobox(row(label), textvariable=var, values=values, state='readonly', width=30)
             cb.pack(side='left')
             cb.bind('<<ComboboxSelected>>', apply)
+
+        fmt_var = variables['date_format'] = tk.StringVar(value=self.style['date_format'])
+        fmt_cb = ttk.Combobox(row('日期格式'), textvariable=fmt_var, values=list(DATE_FORMAT_PRESETS), width=30)
+        fmt_cb.pack(side='left')
+        fmt_cb.bind('<<ComboboxSelected>>', apply)
+        fmt_cb.bind('<Return>', apply)
+        fmt_cb.bind('<FocusOut>', apply)
 
         def choose(key):
             color = colorchooser.askcolor(self.style[key], parent=w, title='选择颜色')[1]
@@ -390,7 +410,8 @@ class Widgets:
         ttk.Button(colors, text='背景颜色', command=lambda: choose('background')).pack(side='left', padx=3)
         checks = ttk.Frame(box)
         checks.pack(fill='x', pady=7)
-        for key, title in [('bold', '加粗'), ('date', '显示日期'), ('seconds', '显示秒'), ('follow', '跟随系统颜色')]:
+        for key, title in [('bold', '加粗'), ('date', '显示日期'), ('seconds', '显示秒'),
+                           ('hour12', '12小时制'), ('follow', '跟随系统颜色')]:
             var = variables[key] = tk.BooleanVar(value=self.style[key])
             ttk.Checkbutton(checks, text=title, variable=var, command=apply).pack(side='left')
 
@@ -404,6 +425,7 @@ class Widgets:
         switches.pack(fill='x')
         for text, var, command in [('当地天气', self.weather_on, self.toggle_weather),
                                    ('图标隐藏时显示时钟', self.clock_on, self.save),
+                                   ('桌面音乐胶囊', self.media.enabled, self.save),
                                    ('启用右侧启动栏', self.bar.enabled, self.save),
                                    ('主题按钮始终置顶', self.theme_button.always, self.save)]:
             ttk.Checkbutton(switches, text=text, variable=var, command=command).pack(side='left')
@@ -477,16 +499,23 @@ class Widgets:
         if not was_dragging:
             return
         self.place_clock(self.clock.winfo_x(), self.clock.winfo_y(), snap=True)
+        pos = self._saved_position()
+        self.cfg['anchor'] = capture_anchor(pos[0], pos[1], self.clock.winfo_reqwidth(), self.clock.winfo_reqheight())
         user32.SetWindowPos(self.clock_hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
         self.save()
         self.sample_wallpaper()
 
-    def _show_clock(self):
-        x, y = self._saved_position()
+    def _relayout_clock(self):
         width, height = self.clock.winfo_reqwidth(), self.clock.winfo_reqheight()
-        l, t, r, b = bounds(x + width // 2, y + height // 2, work=True)
-        x = max(l, min(x, r - width))
-        y = max(t, min(y, b - height))
+        x, y = resolve_anchor(self.cfg.get('anchor'), self._saved_position(), width, height)
+        self.cfg['position'] = [x, y]
+        if self.clock.winfo_viewable():
+            user32.SetWindowPos(self.clock_hwnd, HWND_BOTTOM, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+
+    def _show_clock(self):
+        width, height = self.clock.winfo_reqwidth(), self.clock.winfo_reqheight()
+        x, y = resolve_anchor(self.cfg.get('anchor'), self._saved_position(), width, height)
+        self.cfg['position'] = [x, y]
         self.clock.geometry(f'{x:+d}{y:+d}')
         # 原生 SW_SHOWNOACTIVATE 显示：不抢前台焦点；Tk 的映射状态会随之同步（已验证）
         user32.ShowWindow(self.clock_hwnd, SW_SHOWNOACTIVATE)
@@ -532,6 +561,7 @@ class Widgets:
         self.last_theme = 0
         self.last_position_check = 0
         self.last_clock = ''
+        self.anchors.relayout_all()
 
     # ------------------------------------------------------------ 主循环
     def tick(self):
@@ -549,7 +579,10 @@ class Widgets:
         if now - self.last_theme > THEME_CHECK_SECONDS:
             self.theme()
             self.last_theme = now
-        text = time.strftime('%H:%M:%S' if self.style['seconds'] else '%H:%M')
+        text = (
+            format_clock_text(seconds=bool(self.style['seconds']), hour12=bool(self.style['hour12']))
+            + '|' + format_date_text(fmt=self.style['date_format'], addon=self.style['date_addon'])
+        )
         if text != self.last_clock:
             self.redraw()
             self.last_clock = text
@@ -579,6 +612,7 @@ class Widgets:
         monitor = bounds(p.x, p.y)
         monitor_edge = self.monitor.tick(now, p.x, p.y, monitor, blocked, self.bar.enabled.get(),
                                          suppress_edge=theme_edge, foreground=foreground)
+        self.media.tick(now, blocked, icons)
         bar_opened = self.bar.tick(now, p, monitor, blocked, monitor_edge, theme_edge)
         if bar_opened:
             self.theme_button.raise_()

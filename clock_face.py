@@ -1,7 +1,8 @@
 """时钟表盘绘制（时间、日期、天气及透明微阴影）。"""
 import math
-import time
 from tkinter import font as tkfont
+
+from clock_extras import DEFAULT_DATE_FORMAT, format_clock_text, format_date_text
 
 
 class ClockFace:
@@ -13,8 +14,10 @@ class ClockFace:
     def draw(self, canvas, style, accent, palette, weather):
         canvas.delete('all')
         fg = accent if style['follow'] else style['color']
-        clock = time.strftime('%H:%M:%S' if style['seconds'] else '%H:%M')
-        date = time.strftime('%m月%d日') + '  星期' + '一二三四五六日'[time.localtime().tm_wday]
+        clock = format_clock_text(seconds=bool(style.get('seconds', False)),
+                                  hour12=bool(style.get('hour12', False)))
+        date = format_date_text(fmt=style.get('date_format', DEFAULT_DATE_FORMAT),
+                                addon=style.get('date_addon', '无'))
 
         key = (style['font'], style['size'], style['bold'], style['date_size'])
         if key != self.font_key:
