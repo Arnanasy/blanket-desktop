@@ -212,9 +212,9 @@ class _SmtcWorker:
     def stop(self):
         self._stop.set()
 
-    def send(self, action):
+    def send(self, action, arg=None):
         if HAS_WINRT:
-            self._cmds.put(action)
+            self._cmds.put((action, arg))
 
     def snapshot(self):
         return self._version, self._state
@@ -333,9 +333,10 @@ class _SmtcWorker:
     async def _drain_cmds(self, mgr):
         while True:
             try:
-                action = self._cmds.get_nowait()
+                item = self._cmds.get_nowait()
             except queue.Empty:
                 break
+            action, arg = item if isinstance(item, tuple) else (item, None)
             session = mgr.get_current_session()
             if session is None:
                 continue
@@ -346,6 +347,13 @@ class _SmtcWorker:
                     await session.try_skip_next_async()
                 elif action == 'prev':
                     await session.try_skip_previous_async()
+                elif action == 'seek' and arg is not None:
+                    sec = max(0.0, float(arg))
+                    dur = self._state.get('duration', 0.0)
+                    if dur > 0:
+                        sec = min(dur, sec)
+                    await session.try_change_playback_position_async(int(sec * 10_000_000))
+                    self._state = dict(self._state, pos_base=sec, pos_at=time.monotonic())
             except Exception:
                 log.debug('SMTC 控制指令失败: %s', action, exc_info=True)
 
@@ -411,10 +419,13 @@ class MediaWidget:
         self._hover = False
         self._leave_at = 0.0
 
-        # 拖动与设置弹窗
+        # 拖动、进度条拖拽与设置弹窗
         self._drag_origin = None
         self._drag_offset = None
         self._dragging = False
+        self._seeking = False
+        self._seek_preview = None
+        self._bar_rect = None
         self._btn_rects = {}
         self.dialog = None
         self._dlg_vars = {}
@@ -481,12 +492,13 @@ class MediaWidget:
         cw, ew = self._compact_w(), self._expanded_w()
         return round(cw + (ew - cw) * self._progress)
 
-    def _ensure_fonts(self, title_pt, artist_pt, time_pt):
-        key = (title_pt, artist_pt, time_pt)
+    def _ensure_fonts(self, title_px, artist_px, time_px):
+        # 使用负像素字号，避免 Tkinter 在高 DPI 下与 ui_scale 双重放大
+        key = (title_px, artist_px, time_px)
         if key != self._font_key:
-            self._title_font = tkfont.Font(family='Microsoft YaHei UI', size=title_pt, weight='bold')
-            self._artist_font = tkfont.Font(family='Microsoft YaHei UI', size=artist_pt)
-            self._time_font = tkfont.Font(family='Segoe UI', size=time_pt)
+            self._title_font = tkfont.Font(family='Microsoft YaHei UI', size=-title_px, weight='bold')
+            self._artist_font = tkfont.Font(family='Microsoft YaHei UI', size=-artist_px)
+            self._time_font = tkfont.Font(family='Segoe UI', size=-time_px)
             self._font_key = key
 
     def relayout(self, on_desktop=False):
@@ -499,7 +511,7 @@ class MediaWidget:
 
     def _ensure_cover(self):
         size = self._cover_size()
-        rad = 4 if self.prefs['style'] == '方形卡片' else max(4, round(self.prefs['radius'] * 0.65 * self._k()))
+        rad = 4 if self.prefs['style'] == '方形卡片' else max(6, round(size * 0.13))
         cache_key = (self._state['key'], size, rad)
         if cache_key != self._cover_cache_key:
             self._cover_cache_key = cache_key
@@ -615,6 +627,7 @@ class MediaWidget:
         c.configure(width=w, height=h)
         c.delete('all')
         self._btn_rects.clear()
+        self._bar_rect = None
 
         # 1. 抗锯齿圆角卡片背景
         rad = round(self.prefs['radius'] * k)
@@ -627,19 +640,19 @@ class MediaWidget:
             else:
                 c.create_rectangle(1, 1, w - 1, h - 1, fill=bg, outline=CARD_BORDER)
 
-        # 2. 左侧正方形圆角专辑封面
+        # 2. 左侧正方形微圆角专辑封面
         cx, cy = pad, pad
         if self._cover_photo is not None:
             c.create_image(cx, cy, anchor='nw', image=self._cover_photo)
         else:
-            crad = 4 if style == '方形卡片' else max(4, round(self.prefs['radius'] * 0.65 * k))
+            crad = 4 if style == '方形卡片' else max(6, round(cover * 0.13))
             self._draw_rounded_rect(c, cx, cy, cx + cover, cy + cover, crad, fill='#233044', outline='')
             c.create_text(cx + cover // 2, cy + cover // 2, text='♫',
-                          fill=accent, font=('Segoe UI Symbol', max(16, round(24 * k))))
+                          fill=accent, font=('Segoe UI Symbol', -max(18, round(cover * 0.36))))
 
-        # 紧凑态封面右下角微指示点（展开态底部已有明确播放按钮，隐藏圆点更干净）
+        # 紧凑态封面右下角微指示点
         if self._progress < 0.5:
-            dot_r = max(4, round(5 * k))
+            dot_r = max(4, round(cover * 0.065))
             dot_color = accent if self._state['playing'] else ACCENT_PAUSE
             c.create_oval(cx + cover - dot_r * 2 - 2, cy + cover - dot_r * 2 - 2,
                           cx + cover - 2, cy + cover - 2,
@@ -650,74 +663,91 @@ class MediaWidget:
                 c.create_text(x + 1, y + 1, anchor=anchor, text=text, fill='#0b0f19', font=font_obj)
             c.create_text(x, y, anchor=anchor, text=text, fill=fill, font=font_obj)
 
-        # 3. 右侧三层 Fluent 布局：顶部歌名/歌手 + 中部进度条 + 底部播放控制
+        # 3. 右侧三层 Fluent 布局（全部按 cover 像素比例计算，高 DPI 永不变形）
         if self._progress > 0.35:
-            rx = cx + cover + max(10, round(13 * k))
-            right_pad = max(12, round(14 * k))
+            rx = cx + cover + max(12, round(cover * 0.18))
+            right_pad = max(12, round(cover * 0.18))
             content_w = w - rx - right_pad
-            if content_w > 30:
-                title_pt = max(9, round(10.5 * k))
-                artist_pt = max(8, round(8.5 * k))
-                time_pt = max(7, round(7.2 * k))
-                self._ensure_fonts(title_pt, artist_pt, time_pt)
+            if content_w > 36:
+                title_px = max(13, round(cover * 0.22))
+                artist_px = max(11, round(cover * 0.155))
+                time_px = max(10, round(cover * 0.13))
+                self._ensure_fonts(title_px, artist_px, time_px)
 
-                # 右上角极简锁定按钮（预留 22px 宽，绝不碰歌名）
-                pin_cx = w - right_pad - max(6, round(7 * k))
-                pin_cy = cy + max(8, round(9 * k))
-                title_avail = content_w - (max(20, round(24 * k)) if self._progress > 0.8 else 0)
+                # 右上角极简锁定按钮
+                pin_cx = w - right_pad - max(6, round(cover * 0.08))
+                pin_cy = cy + max(9, round(cover * 0.12))
+                title_avail = content_w - (max(20, round(cover * 0.28)) if self._progress > 0.8 else 0)
                 title = fit_text_width(self._state['title'] or '未命名曲目', self._title_font.measure, title_avail)
                 artist = fit_text_width(self._state['artist'] or '正在播放', self._artist_font.measure, content_w)
 
                 if title:
-                    draw_text(rx, cy - 1, title, self._title_font, fg)
+                    draw_text(rx, cy + round(cover * 0.02), title, self._title_font, fg)
                 if artist:
-                    draw_text(rx, cy + round(cover * 0.28), artist, self._artist_font,
-                              TEXT_SECONDARY if style != '极简透明' else fg)
+                    draw_text(rx, cy + round(cover * 0.30), artist, self._artist_font,
+                              TEXT_SECONDARY if style != '极简透明' else '#CBD5E1')
 
                 if self._progress > 0.82:
-                    # 锁定指示器
-                    pin_hit = max(10, round(11 * k))
+                    pin_hit = max(9, round(cover * 0.12))
                     if self._hover_btn == 'pin':
                         c.create_oval(pin_cx - pin_hit, pin_cy - pin_hit,
                                       pin_cx + pin_hit, pin_cy + pin_hit,
                                       fill='#2A3648', outline='')
-                    self._draw_vector_icon(c, 'pin', pin_cx, pin_cy, max(7, round(8 * k)),
+                    self._draw_vector_icon(c, 'pin', pin_cx, pin_cy, max(6, round(cover * 0.095)),
                                            accent if self.locked else TEXT_SECONDARY)
                     self._btn_rects['pin'] = (pin_cx - pin_hit, pin_cy - pin_hit,
                                               pin_cx + pin_hit, pin_cy + pin_hit)
 
-                    # 中部极细进度条 + 时间数字
+                    # 中部圆角可拖动进度条 + 精致小号时间
                     bar_y = cy + round(cover * 0.59)
-                    bar_h = max(3, round(3 * k))
-                    pos_s = self.worker.estimated_position()
+                    bar_h = max(3, round(cover * 0.045))
+                    pos_s = self._seek_preview if self._seeking and self._seek_preview is not None else self.worker.estimated_position()
                     dur_s = self._state.get('duration', 0.0)
                     ratio = max(0.0, min(1.0, pos_s / dur_s)) if dur_s > 0 else 0.0
-                    time_str = f'{_fmt_mmss(pos_s)}/{_fmt_mmss(dur_s)}' if dur_s > 0 else ''
-                    time_w = (self._time_font.measure(time_str) + max(8, round(8 * k))) if time_str else 0
-                    bar_w = max(24, content_w - time_w)
-                    c.create_rectangle(rx, bar_y, rx + bar_w, bar_y + bar_h, fill='#334155', outline='')
+                    time_str = f'{_fmt_mmss(pos_s)} / {_fmt_mmss(dur_s)}' if dur_s > 0 else ''
+                    time_w = (self._time_font.measure(time_str) + max(8, round(cover * 0.12))) if time_str else 0
+                    bar_w = max(28, content_w - time_w)
+                    x0, x1 = rx, rx + bar_w
+                    track_color = '#475569' if style == '极简透明' else '#334155'
+                    c.create_line(x0, bar_y, x1, bar_y, fill=track_color, width=bar_h, capstyle='round')
+                    fill_x = x0 + round(bar_w * ratio)
                     if ratio > 0.005:
-                        c.create_rectangle(rx, bar_y, rx + max(bar_h, round(bar_w * ratio)),
-                                           bar_y + bar_h, fill=accent, outline='')
+                        c.create_line(x0, bar_y, max(x0 + 1, fill_x), bar_y, fill=accent, width=bar_h, capstyle='round')
+                    # 悬停或拖动进度条时显示精致圆形滑块
+                    if self._seeking or self._hover_btn == 'bar':
+                        knob_r = max(4, round(bar_h * 1.35))
+                        c.create_oval(fill_x - knob_r, bar_y - knob_r,
+                                      fill_x + knob_r, bar_y + knob_r,
+                                      fill=fg, outline=accent, width=1.5)
+                    if dur_s > 0:
+                        hit_pad = max(7, round(cover * 0.10))
+                        self._bar_rect = (x0 - 4, bar_y - hit_pad, x1 + 4, bar_y + hit_pad, x0, x1)
                     if time_str:
-                        draw_text(w - right_pad, bar_y + bar_h // 2, time_str,
-                                  self._time_font, TEXT_SECONDARY, anchor='e')
+                        draw_text(w - right_pad, bar_y, time_str,
+                                  self._time_font, '#CBD5E1' if style == '极简透明' else TEXT_SECONDARY, anchor='e')
 
-                    # 底部居中控制区：上一首 · 圆形高亮播放/暂停 · 下一首
-                    ctrl_y = cy + round(cover * 0.86)
+                    # 底部居中控制区：上一首 · 播放/暂停 · 下一首（透明模式下克制无突兀大圆）
+                    ctrl_y = cy + round(cover * 0.85)
                     mid_x = rx + content_w // 2
-                    gap_x = max(32, round(38 * k))
-                    main_r = max(13, round(14 * k))
-                    sub_r = max(11, round(12 * k))
-                    icon_r = max(6, round(7.5 * k))
+                    gap_x = max(28, round(cover * 0.42))
+                    main_r = max(11, round(cover * 0.155))
+                    sub_r = max(10, round(cover * 0.135))
+                    icon_r = max(5.5, round(cover * 0.085))
 
-                    # 主播放按钮圆形底（始终带柔和圆形高亮，悬停更亮）
-                    main_fill = accent if self._hover_btn == 'toggle' else '#263449'
-                    main_icon_fill = '#0F172A' if self._hover_btn == 'toggle' else fg
-                    c.create_oval(mid_x - main_r, ctrl_y - main_r,
-                                  mid_x + main_r, ctrl_y + main_r,
-                                  fill=main_fill, outline=accent if self._state['playing'] else CARD_BORDER, width=1)
-                    self._draw_vector_icon(c, 'toggle', mid_x, ctrl_y, icon_r, main_icon_fill)
+                    if style == '极简透明':
+                        if self._hover_btn == 'toggle':
+                            c.create_oval(mid_x - main_r, ctrl_y - main_r,
+                                          mid_x + main_r, ctrl_y + main_r,
+                                          fill='#263449', outline='')
+                        self._draw_vector_icon(c, 'toggle', mid_x, ctrl_y, icon_r * 1.15,
+                                               accent if self._hover_btn == 'toggle' else fg)
+                    else:
+                        main_fill = accent if self._hover_btn == 'toggle' else '#263449'
+                        main_icon_fill = '#0F172A' if self._hover_btn == 'toggle' else fg
+                        c.create_oval(mid_x - main_r, ctrl_y - main_r,
+                                      mid_x + main_r, ctrl_y + main_r,
+                                      fill=main_fill, outline='', width=0)
+                        self._draw_vector_icon(c, 'toggle', mid_x, ctrl_y, icon_r, main_icon_fill)
                     self._btn_rects['toggle'] = (mid_x - main_r, ctrl_y - main_r,
                                                  mid_x + main_r, ctrl_y + main_r)
 
@@ -726,7 +756,8 @@ class MediaWidget:
                             c.create_oval(bx - sub_r, ctrl_y - sub_r,
                                           bx + sub_r, ctrl_y + sub_r,
                                           fill='#263449', outline='')
-                        self._draw_vector_icon(c, action, bx, ctrl_y, icon_r * 0.9, fg)
+                        self._draw_vector_icon(c, action, bx, ctrl_y, icon_r * 0.9,
+                                               accent if (style == '极简透明' and self._hover_btn == action) else fg)
                         self._btn_rects[action] = (bx - sub_r, ctrl_y - sub_r,
                                                    bx + sub_r, ctrl_y + sub_r)
 
@@ -882,15 +913,33 @@ class MediaWidget:
             self._hover_btn = None
             self._render()
 
+    def _hit_bar(self, x, y):
+        if not self._bar_rect:
+            return False
+        bx1, by1, bx2, by2, _x0, _x1 = self._bar_rect
+        return bx1 <= x <= bx2 and by1 <= y <= by2
+
+    def _seek_sec_from_x(self, x):
+        if not self._bar_rect:
+            return None
+        _bx1, _by1, _bx2, _by2, x0, x1 = self._bar_rect
+        dur = self._state.get('duration', 0.0)
+        if dur <= 0 or x1 <= x0:
+            return None
+        ratio = max(0.0, min(1.0, (x - x0) / (x1 - x0)))
+        return ratio * dur
+
     def _on_hover_motion(self, e):
-        if self._dragging or self._progress <= 0.82:
+        if self._dragging or self._seeking or self._progress <= 0.82:
             return
-        hit = self._hit_button(e.x, e.y)
+        hit = 'bar' if self._hit_bar(e.x, e.y) else self._hit_button(e.x, e.y)
         if hit != self._hover_btn:
             self._hover_btn = hit
             self._render()
 
     def _on_double_click(self, _e=None):
+        if self._seeking:
+            return
         self.locked = not self.locked
         if self.dialog and self.dialog.winfo_exists() and 'locked' in self._dlg_vars:
             self._dlg_vars['locked'].set(self.locked)
@@ -905,11 +954,25 @@ class MediaWidget:
         return None
 
     def _on_press(self, e):
+        if self._progress > 0.82 and self._hit_bar(e.x, e.y):
+            sec = self._seek_sec_from_x(e.x)
+            if sec is not None:
+                self._seeking = True
+                self._seek_preview = sec
+                self._hover_btn = 'bar'
+                self._render()
+                return
         self._drag_origin = (e.x_root, e.y_root)
         self._drag_offset = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
         self._dragging = False
 
     def _on_motion(self, e):
+        if self._seeking:
+            sec = self._seek_sec_from_x(e.x)
+            if sec is not None:
+                self._seek_preview = sec
+                self._render()
+            return
         if self._drag_origin is None or self._drag_offset is None:
             return
         if not self._dragging:
@@ -925,6 +988,15 @@ class MediaWidget:
             self.lyrics.relayout(on_desktop=True)
 
     def _on_release(self, e):
+        if self._seeking:
+            target = self._seek_preview
+            self._seeking = False
+            self._seek_preview = None
+            if target is not None:
+                self.worker.send('seek', target)
+                self._state = dict(self._state, pos_base=target, pos_at=time.monotonic())
+            self._render()
+            return
         was_drag = self._dragging
         self._drag_origin = None
         self._drag_offset = None
