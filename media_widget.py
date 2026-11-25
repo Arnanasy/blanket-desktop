@@ -122,9 +122,12 @@ def sanitize_media_prefs(raw):
         prefs['lyrics_mode'] = MEDIA_DEFAULTS['lyrics_mode']
     if prefs['lyrics_lines'] not in LYRICS_LINE_OPTIONS:
         prefs['lyrics_lines'] = MEDIA_DEFAULTS['lyrics_lines']
-    for k in ('bg', 'fg', 'accent'):
+    for k in ('bg', 'fg', 'accent', 'lyrics_color', 'lyrics_next_color'):
         if not (isinstance(prefs[k], str) and re.fullmatch(r'#[0-9a-fA-F]{6}', prefs[k])):
             prefs[k] = MEDIA_DEFAULTS[k]
+    lfont = prefs.get('lyrics_font', '')
+    if not isinstance(lfont, str) or not lfont.strip() or lfont.startswith('@') or '汉仪中黑' in lfont:
+        prefs['lyrics_font'] = MEDIA_DEFAULTS['lyrics_font']
     return prefs
 
 
@@ -510,15 +513,17 @@ class MediaWidget:
             self._render()
             self.relayout(on_desktop=True)
             self._show_hint(f'大小 {val}%')
-        else:
+            self.widgets.queue_save()
+            return 'break'
+        if event.state & 1:  # Shift + 滚轮调不透明度（防止裸滚轮误触）
             val = max(35, min(100, self.prefs['opacity'] + direction * 5))
             self.prefs['opacity'] = val
             if self.dialog and self.dialog.winfo_exists() and 'opacity' in self._dlg_vars:
                 self._dlg_vars['opacity'].set(val)
             self._render()
             self._show_hint(f'不透明度 {val}%')
-        self.widgets.queue_save()
-        return 'break'
+            self.widgets.queue_save()
+            return 'break'
 
     def open_settings(self):
         open_media_settings(self, MEDIA_DEFAULTS, MEDIA_STYLES, sanitize_media_prefs)

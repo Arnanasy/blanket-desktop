@@ -22,10 +22,14 @@ LYRICS_LINE_OPTIONS = ('双行', '单行')
 
 LYRICS_DEFAULTS = dict(
     lyrics_enabled=True,
-    lyrics_mode='独立拖动',     # 独立拖动 / 紧贴胶囊下方
-    lyrics_lines='双行',        # 双行 / 单行
-    lyrics_size=22,            # 字号（14..42）
-    lyrics_offset=0.0,         # 时间轴偏移秒数（-3.0..3.0）
+    lyrics_mode='独立拖动',          # 独立拖动 / 紧贴胶囊下方
+    lyrics_lines='双行',             # 双行 / 单行
+    lyrics_size=22,                 # 字号（14..42）
+    lyrics_offset=0.0,              # 时间轴偏移秒数（-3.0..3.0）
+    lyrics_font='Microsoft YaHei UI',  # 歌词字体
+    lyrics_color='#F8FAFC',         # 当前句文字颜色
+    lyrics_next_color='#CBD5E1',    # 下一句文字颜色
+    lyrics_bold=True,               # 当前句是否加粗
 )
 
 _LRC_TAG_RE = re.compile(r'\[(\d{1,3}):(\d{2})(?:\.(\d{1,3}))?\]')
@@ -184,6 +188,8 @@ class LyricsOverlay:
         self._fetching = set()
         self._active_key = None
         self._lines = []
+        self._last_cur = ''
+        self._last_nxt = ''
         self._last_drawn = None
         self._last_alpha = None
         self._font_key = None
@@ -232,21 +238,25 @@ class LyricsOverlay:
 
         Thread(target=job, name='lyrics', daemon=True).start()
 
-    def _ensure_fonts(self, size):
+    def _ensure_fonts(self, size, family='Microsoft YaHei UI', bold=True):
         size = max(14, min(42, int(size)))
         sub_size = max(11, round(size * 0.72))
-        key = (size, sub_size)
+        family = (family or 'Microsoft YaHei UI').strip() or 'Microsoft YaHei UI'
+        weight = 'bold' if bold else 'normal'
+        key = (size, sub_size, family, weight)
         if key != self._font_key:
-            self._main_font = tkfont.Font(family='Microsoft YaHei UI', size=size, weight='bold')
-            self._sub_font = tkfont.Font(family='Microsoft YaHei UI', size=sub_size)
+            self._main_font = tkfont.Font(family=family, size=size, weight=weight)
+            self._sub_font = tkfont.Font(family=family, size=sub_size)
             self._font_key = key
 
     def _render(self, cur, nxt, prefs):
         size = prefs['lyrics_size']
         two_lines = prefs['lyrics_lines'] == '双行'
-        fg = prefs['fg']
+        fg = prefs.get('lyrics_color') or prefs['fg']
+        next_fg = prefs.get('lyrics_next_color') or '#CBD5E1'
         accent = prefs['accent']
-        self._ensure_fonts(size)
+        self._ensure_fonts(size, prefs.get('lyrics_font', 'Microsoft YaHei UI'),
+                           prefs.get('lyrics_bold', True))
 
         main_text = cur or nxt
         sub_text = nxt if (two_lines and cur and nxt) else ''
@@ -278,7 +288,7 @@ class LyricsOverlay:
 
         draw_outlined(w // 2, pad_y, main_text, self._main_font, fg if cur else accent)
         if sub_text:
-            draw_outlined(w // 2, pad_y + mh + 4, sub_text, self._sub_font, '#CBD5E1')
+            draw_outlined(w // 2, pad_y + mh + 4, sub_text, self._sub_font, next_fg)
         return True
 
     def _target_xy(self, prefs):
@@ -289,6 +299,22 @@ class LyricsOverlay:
             mh = self.media._card_h()
             return clamp_to_work_area(mx, my + mh + 8, w, h, margin=8)
         return resolve_anchor(self.anchor, self.pos, w, h, margin=8)
+
+    def refresh_now(self):
+        """设置变更后立即重绘当前桌面歌词，不等下一帧或下一句切换。"""
+        self._last_drawn = None
+        if not self.win.winfo_viewable():
+            return
+        cur, nxt = self._last_cur, self._last_nxt
+        if not (cur or nxt):
+            return
+        prefs = self.media.prefs
+        if self._render(cur, nxt, prefs):
+            x, y = self._target_xy(prefs)
+            if prefs['lyrics_mode'] == '独立拖动':
+                self.pos = [x, y]
+            self.win.geometry(f'{x:+d}{y:+d}')
+            place_on_desktop(self.hwnd, x, y, on_desktop=True, show=True)
 
     def relayout(self, on_desktop=False):
         if not self.win.winfo_viewable():
@@ -354,8 +380,13 @@ class LyricsOverlay:
 
         adj_pos = max(0.0, float(pos_sec) + float(prefs['lyrics_offset']))
         cur, nxt = current_lyric_lines(self._lines, adj_pos)
-        draw_sig = (cur, nxt, prefs['lyrics_size'], prefs['lyrics_lines'],
-                    prefs['fg'], prefs['accent'], prefs['opacity'], prefs['lyrics_mode'])
+        self._last_cur, self._last_nxt = cur, nxt
+        draw_sig = (
+            cur, nxt, prefs['lyrics_size'], prefs['lyrics_lines'],
+            prefs.get('lyrics_font'), prefs.get('lyrics_color'),
+            prefs.get('lyrics_next_color'), prefs.get('lyrics_bold'),
+            prefs['fg'], prefs['accent'], prefs['opacity'], prefs['lyrics_mode'],
+        )
         visible = bool(self.win.winfo_viewable())
 
         if draw_sig != self._last_drawn:

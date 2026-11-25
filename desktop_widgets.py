@@ -90,6 +90,7 @@ class Widgets:
         self.control_vars = {}
         self.settings_window = None
         self.preview = None
+        self._preview_overrides = {}
         self._last_alpha = None
         self._font_choices = None
 
@@ -159,6 +160,12 @@ class Widgets:
                 self.root.winfo_rgb(style[k])
             except tk.TclError:
                 style[k] = STYLE_DEFAULTS[k]
+        # 过滤 Windows 竖排专用字体（@ 开头）及已知排版异常字体
+        if isinstance(style.get('font'), str):
+            if style['font'].startswith('@'):
+                style['font'] = style['font'].lstrip('@') or STYLE_DEFAULTS['font']
+            if '汉仪中黑' in style['font']:
+                style['font'] = STYLE_DEFAULTS['font']
         return style
 
     def _load_palettes(self):
@@ -213,11 +220,12 @@ class Widgets:
         if not event.delta:
             return
         direction = 1 if event.delta > 0 else -1
-        if event.state & 4:     # Ctrl + 滚轮调字号
+        if event.state & 4:       # Ctrl + 滚轮调字号
             self.adjust('size', max(16, min(160, self.style['size'] + direction * 2)))
-        else:
+            return 'break'
+        if event.state & 1:       # Shift + 滚轮调不透明度（防止裸滚轮误触）
             self.adjust('opacity', max(30, min(100, self.style['opacity'] + direction * 5)))
-        return 'break'
+            return 'break'
 
     def adjust(self, key, value):
         self.style[key] = value
@@ -237,7 +245,7 @@ class Widgets:
         if self.preview and self.preview.winfo_exists():
             self.draw_clock(self.preview)
 
-    def draw_clock(self, canvas=None):
+    def draw_clock(self, canvas=None, style_override=None):
         weather = ''
         if self.weather_on.get():
             weather = self.weather.get('line') or \
@@ -249,9 +257,23 @@ class Widgets:
                                  or not (0 <= time.time() - self.weather['updated'] <= 1800)):
                 weather += '（上次）'
         palette = self.palettes.get(self.palette) if self.adaptive.get() else None
-        self.face.draw(canvas or self.clock_label, self.style, self.accent, palette, weather)
+        is_preview = canvas is not None and canvas is self.preview
+        if style_override is not None:
+            style = style_override
+        elif is_preview and self._preview_overrides:
+            style = {**self.style, **self._preview_overrides}
+        else:
+            style = self.style
+        max_size = None
+        if is_preview:
+            parent = getattr(self, 'preview_viewport', None)
+            if parent and parent.winfo_exists():
+                pw = max(260, parent.winfo_width() - 16)
+                ph = max(110, parent.winfo_height() - 16)
+                max_size = (pw, ph)
+        self.face.draw(canvas or self.clock_label, style, self.accent, palette, weather, max_size=max_size)
         if canvas is None:
-            alpha = self.style['opacity'] / 100
+            alpha = style['opacity'] / 100
             if alpha != self._last_alpha:
                 self._last_alpha = alpha
                 self.clock.attributes('-alpha', alpha)
@@ -398,9 +420,105 @@ class Widgets:
                      showvalue=True, length=340).pack(side='left', fill='x', expand=True)
 
         if self._font_choices is None:
-            all_families = sorted(set(tkfont.families()))
+            # 排除 Windows 竖排专用字体（@ 开头）、纯图标/符号字体及已知异常字体
+            skip_keywords = ('wingdings', 'webdings', 'marlett', 'mdl2', 'fluent icons', 'mt extra', '汉仪中黑')
+            skip_exact = {'symbol', 'ms outlook', 'ms reference specialty', 'bookshelf symbol 7'}
+
+            def is_usable_font(name):
+                if not name or name.startswith('@'):
+                    return False
+                low = name.lower()
+                if low in skip_exact or any(k in low for k in skip_keywords):
+                    return False
+                return True
+
+            all_families = sorted({f for f in tkfont.families() if is_usable_font(f)})
             preferred = ['Bahnschrift', 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei UI', 'Consolas', 'Arial']
             self._font_choices = [f for f in preferred if f in all_families] + [f for f in all_families if f not in preferred]
+
+        def attach_hover_preview(cb, key):
+            """下拉框鼠标滑过实时预览（仅刷新预览区，不引起桌面透明窗口黑框闪烁；带 90ms 防抖）。"""
+            state = {'last': None, 'committed': False, 'bound': False, 'timer': None}
+
+            def cancel_timer():
+                if state['timer'] is not None:
+                    try:
+                        w.after_cancel(state['timer'])
+                    except tk.TclError:
+                        pass
+                    state['timer'] = None
+
+            def apply_preview(val):
+                state['timer'] = None
+                if val == state['last'] or not w.winfo_exists():
+                    return
+                state['last'] = val
+                self._preview_overrides[key] = val
+                if self.preview and self.preview.winfo_exists():
+                    self.draw_clock(self.preview)
+
+            def schedule_preview(val):
+                if val == state['last']:
+                    return
+                cancel_timer()
+                state['timer'] = w.after(90, lambda v=val: apply_preview(v))
+
+            def on_selected(_e=None):
+                cancel_timer()
+                state['committed'] = True
+                state['last'] = variables[key].get()
+                self._preview_overrides.pop(key, None)
+                apply()
+
+            cb.bind('<<ComboboxSelected>>', on_selected)
+
+            def bind_popdown():
+                cancel_timer()
+                state['last'] = self.style.get(key)
+                state['committed'] = False
+
+                def attach():
+                    if state['bound'] or not w.winfo_exists():
+                        return
+                    try:
+                        pop = cb.tk.call('ttk::combobox::PopdownWindow', cb)
+                        lb_path = f'{pop}.f.l'
+                        if not cb.tk.call('winfo', 'exists', lb_path):
+                            return
+                    except tk.TclError:
+                        return
+                    state['bound'] = True
+
+                    def on_motion_y(y_str):
+                        try:
+                            idx = int(cb.tk.call(lb_path, 'nearest', int(y_str)))
+                            size = int(cb.tk.call(lb_path, 'size'))
+                            if 0 <= idx < size:
+                                schedule_preview(str(cb.tk.call(lb_path, 'get', idx)))
+                        except (tk.TclError, ValueError):
+                            pass
+
+                    def restore_if_uncommitted():
+                        if not state['committed'] and w.winfo_exists():
+                            self._preview_overrides.pop(key, None)
+                            state['last'] = None
+                            if self.preview and self.preview.winfo_exists():
+                                self.draw_clock(self.preview)
+
+                    def on_unmap():
+                        cancel_timer()
+                        if w.winfo_exists():
+                            w.after(40, restore_if_uncommitted)
+
+                    motion_cb = w.register(on_motion_y)
+                    unmap_cb = w.register(on_unmap)
+                    cb.tk.call('bind', lb_path, '<Motion>', f'+{motion_cb} %y')
+                    cb.tk.call('bind', lb_path, '<Unmap>', f'+{unmap_cb}')
+
+                w.after(15, attach)
+
+            cb.configure(postcommand=bind_popdown)
+
         for key, label, values in [('font', '字体', self._font_choices),
                                    ('shape', '形状', ['透明', '矩形卡片', '圆角卡片', '圆形']),
                                    ('layout', '排列', ['上下排列', '左右排列']),
@@ -408,14 +526,15 @@ class Widgets:
             var = variables[key] = tk.StringVar(value=self.style[key])
             cb = ttk.Combobox(row(label), textvariable=var, values=values, state='readonly', width=30)
             cb.pack(side='left')
-            cb.bind('<<ComboboxSelected>>', apply)
+            attach_hover_preview(cb, key)
 
         fmt_var = variables['date_format'] = tk.StringVar(value=self.style['date_format'])
         fmt_cb = ttk.Combobox(row('日期格式'), textvariable=fmt_var, values=list(DATE_FORMAT_PRESETS), width=30)
         fmt_cb.pack(side='left')
-        fmt_cb.bind('<<ComboboxSelected>>', apply)
+        attach_hover_preview(fmt_cb, 'date_format')
         fmt_cb.bind('<Return>', apply)
         fmt_cb.bind('<FocusOut>', apply)
+        w.bind('<Destroy>', lambda _e: self._preview_overrides.clear(), add='+')
 
         def choose(key):
             color = colorchooser.askcolor(self.style[key], parent=w, title='选择颜色')[1]
@@ -453,19 +572,21 @@ class Widgets:
                   ).pack(anchor='w', pady=(10, 4))
         frame = ttk.Frame(pane)
         frame.pack(fill='both', expand=True)
-        viewport = tk.Canvas(frame, bg='#334155', highlightthickness=0)
-        viewport.grid(row=0, column=0, sticky='nsew')
-        sx = ttk.Scrollbar(frame, orient='horizontal', command=viewport.xview)
-        sx.grid(row=1, column=0, sticky='ew')
-        sy = ttk.Scrollbar(frame, command=viewport.yview)
-        sy.grid(row=0, column=1, sticky='ns')
-        frame.rowconfigure(0, weight=1)
-        frame.columnconfigure(0, weight=1)
-        viewport.configure(xscrollcommand=sx.set, yscrollcommand=sy.set)
+        viewport = self.preview_viewport = tk.Canvas(frame, bg='#334155', highlightthickness=0, height=round(150 * self.ui_scale))
+        viewport.pack(fill='both', expand=True)
         self.preview = tk.Canvas(viewport, bg='#334155', highlightthickness=0)
-        viewport.create_window(0, 0, window=self.preview, anchor='nw')
-        self.preview.bind('<Configure>', lambda e: viewport.configure(scrollregion=viewport.bbox('all')))
-        self.draw_clock(self.preview)
+        preview_item = viewport.create_window(0, 0, window=self.preview, anchor='center')
+
+        def center_preview(_e=None):
+            if not viewport.winfo_exists() or not self.preview.winfo_exists():
+                return
+            vw = max(1, viewport.winfo_width())
+            vh = max(1, viewport.winfo_height())
+            viewport.coords(preview_item, vw / 2, vh / 2)
+            self.draw_clock(self.preview)
+
+        viewport.bind('<Configure>', center_preview)
+        w.after(20, center_preview)
         ttk.Button(pane, text='完成（已自动保存）', command=w.destroy).pack(pady=(10, 0))
 
     # ------------------------------------------------------------ 时钟位置

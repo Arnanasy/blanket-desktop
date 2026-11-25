@@ -11,7 +11,24 @@ class ClockFace:
         self.time_font = None
         self.date_font = None
 
-    def draw(self, canvas, style, accent, palette, weather):
+    def _measure(self, clock, date, weather, style, size, date_size, pad):
+        f = tkfont.Font(family=style['font'], size=size, weight='bold' if style['bold'] else 'normal')
+        df = tkfont.Font(family=style['font'], size=date_size)
+        tw, th = f.measure(clock), f.metrics('linespace')
+        dw, dh = (df.measure(date), df.metrics('linespace')) if style['date'] else (0, 0)
+        horizontal = style['layout'] == '左右排列'
+        width = (tw + dw + pad if horizontal and dw else max(tw, dw)) + pad * 2
+        height = (max(th, dh) if horizontal else th + dh) + pad * 2
+        weather_gap = max(6, round(df.metrics('linespace') * 0.28)) if weather else 0
+        extra = (df.metrics('linespace') + weather_gap) if weather else 0
+        width = max(width, df.measure(weather) + pad * 2)
+        height += extra
+        content_height = height
+        if style['shape'] == '圆形':
+            width = height = math.ceil(math.hypot(width, height))
+        return f, df, tw, th, dw, dh, extra, width, height, content_height
+
+    def draw(self, canvas, style, accent, palette, weather, max_size=None):
         canvas.delete('all')
         fg = accent if style['follow'] else style['color']
         clock = format_clock_text(seconds=bool(style.get('seconds', False)),
@@ -19,27 +36,48 @@ class ClockFace:
         date = format_date_text(fmt=style.get('date_format', DEFAULT_DATE_FORMAT),
                                 addon=style.get('date_addon', '无'))
 
-        key = (style['font'], style['size'], style['bold'], style['date_size'])
-        if key != self.font_key:
-            self.time_font = tkfont.Font(family=key[0], size=key[1], weight='bold' if key[2] else 'normal')
-            self.date_font = tkfont.Font(family=key[0], size=key[3])
-            self.font_key = key
-
-        f, df = self.time_font, self.date_font
-        tw, th = f.measure(clock), f.metrics('linespace')
-        dw, dh = (df.measure(date), df.metrics('linespace')) if style['date'] else (0, 0)
-        pad = style['padding']
+        size, date_size, pad = style['size'], style['date_size'], style['padding']
         horizontal = style['layout'] == '左右排列'
 
-        width = (tw + dw + pad if horizontal and dw else max(tw, dw)) + pad * 2
-        height = (max(th, dh) if horizontal else th + dh) + pad * 2
-        extra = df.metrics('linespace') if weather else 0
-        width = max(width, df.measure(weather) + pad * 2)
-        height += extra
-        content_height = height
+        if max_size is not None:
+            # 预览区模式：超出可用边界时按比例自动缩小，确保时间、日期、天气始终完整显示
+            max_w, max_h = max(80, int(max_size[0])), max(60, int(max_size[1]))
+            for _ in range(4):
+                f, df, tw, th, dw, dh, extra, width, height, content_height = self._measure(
+                    clock, date, weather, style, size, date_size, pad,
+                )
+                if width <= max_w and height <= max_h:
+                    break
+                scale = min(max_w / max(1, width), max_h / max(1, height)) * 0.92
+                new_size = max(6, int(size * scale))
+                new_date = max(6, int(date_size * scale))
+                new_pad = max(2, int(pad * scale))
+                if (new_size, new_date, new_pad) == (size, date_size, pad):
+                    break
+                size, date_size, pad = new_size, new_date, new_pad
+            else:
+                f, df, tw, th, dw, dh, extra, width, height, content_height = self._measure(
+                    clock, date, weather, style, size, date_size, pad,
+                )
+        else:
+            key = (style['font'], size, style['bold'], date_size)
+            if key != self.font_key:
+                self.time_font = tkfont.Font(family=key[0], size=key[1], weight='bold' if key[2] else 'normal')
+                self.date_font = tkfont.Font(family=key[0], size=key[3])
+                self.font_key = key
+            f, df = self.time_font, self.date_font
+            tw, th = f.measure(clock), f.metrics('linespace')
+            dw, dh = (df.measure(date), df.metrics('linespace')) if style['date'] else (0, 0)
+            width = (tw + dw + pad if horizontal and dw else max(tw, dw)) + pad * 2
+            height = (max(th, dh) if horizontal else th + dh) + pad * 2
+            weather_gap = max(6, round(df.metrics('linespace') * 0.28)) if weather else 0
+            extra = (df.metrics('linespace') + weather_gap) if weather else 0
+            width = max(width, df.measure(weather) + pad * 2)
+            height += extra
+            content_height = height
+            if style['shape'] == '圆形':
+                width = height = math.ceil(math.hypot(width, height))
 
-        if style['shape'] == '圆形':
-            width = height = math.ceil(math.hypot(width, height))
         canvas.configure(width=width, height=height)
 
         if style['shape'] != '透明':
