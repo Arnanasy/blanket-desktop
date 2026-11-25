@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-净桌面 - 鼠标热区自动隐藏 / 显示桌面图标
+Blanket - 鼠标热区自动隐藏 / 显示桌面图标
 核心功能使用 Python 标准库；壁纸亮度自适应使用可选依赖 Pillow。
 
 功能：
@@ -81,10 +81,10 @@ class App:
         self._quitting = False
         self.recovery_guard = None
         try:
-            root.iconbitmap(default=str(Path(__file__).with_name('时隙.ico')))
+            root.iconbitmap(default=str(Path(__file__).with_name('Blanket.ico')))
         except tk.TclError:
             pass
-        root.title('净桌面')
+        root.title('Blanket')
         root.configure(bg=BG)
         root.resizable(False, False)
 
@@ -96,7 +96,7 @@ class App:
         f_small = ('Microsoft YaHei UI', 8)
 
         self.subtext_labels = set()
-        tk.Label(root, text='净桌面', font=f_title, bg=BG, fg=TEXT).pack(pady=(18, 2))
+        tk.Label(root, text='Blanket', font=f_title, bg=BG, fg=TEXT).pack(pady=(18, 2))
         sub_label = tk.Label(root, text='鼠标移到屏幕边缘自动显示，移开只剩壁纸',
                              font=f_sub, bg=BG, fg=SUBTEXT)
         sub_label.pack(pady=(0, 12))
@@ -520,7 +520,7 @@ def _signal_running_instance(mutex):
         time.sleep(0.1)
     kernel32.CloseHandle(mutex)
     if not existing_event:
-        raise RuntimeError('净桌面已经运行，但未能唤出设置。请从托盘退出旧版本后重试。')
+        raise RuntimeError('Blanket 已经运行，但未能唤出设置。请从托盘退出旧版本后重试。')
     kernel32.SetEvent(existing_event)
     kernel32.CloseHandle(existing_event)
 

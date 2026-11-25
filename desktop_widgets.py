@@ -41,6 +41,23 @@ DEFAULT_POSITION = [40, 70]
 
 def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def resolve_on_desktop(foreground, fg_class, prev_on_desktop=False):
+    """根据当前前景窗口判断桌面挂件是否应置于桌面之上。
+
+    - 前景为桌面（WorkerW / Progman）：返回 True；
+    - 前景为任务栏或空句柄：沿用上一帧状态，避免软件最大化时点任务栏把时钟/音乐顶到最上层，
+      也避免在桌面上点任务栏时挂件沉到壁纸下方；
+    - 前景为普通软件窗口：返回 False，挂件沉底。
+    """
+    if fg_class in ('WorkerW', 'Progman'):
+        return True
+    if not foreground or fg_class in ('Shell_TrayWnd', 'Shell_SecondaryTrayWnd'):
+        return bool(prev_on_desktop)
+    return False
+
+
 SHELL_CLASSES = ('Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd')
 STYLE_DEFAULTS = dict(size=52, date_size=18, font='Segoe UI', color='#FFFFFF', background='#18202D',
                       shape='透明', layout='上下排列', bold=False, date=True, seconds=False,
@@ -354,7 +371,7 @@ class Widgets:
         toolbar = ttk.Frame(w)
         toolbar.pack(fill='x', padx=16, pady=(8, 0))
         ttk.Button(toolbar, text='音乐胶囊设置…', command=self.media.open_settings).pack(side='left')
-        ttk.Button(toolbar, text='退出净桌面', command=self.app.quit_app).pack(side='right')
+        ttk.Button(toolbar, text='退出 Blanket', command=self.app.quit_app).pack(side='right')
         pane = ttk.Frame(w, padding=16)
         pane.pack(fill='both', expand=True)
         ttk.Label(pane, text='时钟外观 · 修改立即生效', font=('Microsoft YaHei UI', 14)).pack(anchor='w')
@@ -594,7 +611,7 @@ class Widgets:
         if desktop_foreground and desktop_foreground != self.last_desktop_foreground:
             invalidate_cache()       # 桌面窗口可能被重建，重新查找
         self.last_desktop_foreground = desktop_foreground
-        on_desktop = bool(desktop_foreground) or (not foreground) or name in ('Shell_TrayWnd', 'Shell_SecondaryTrayWnd')
+        on_desktop = resolve_on_desktop(foreground, name, self._was_on_desktop)
         restack = (on_desktop != self._was_on_desktop) or bool(user32.IsIconic(self.clock_hwnd))
         self._was_on_desktop = on_desktop
         blocked = self.fullscreen_active(foreground, name)

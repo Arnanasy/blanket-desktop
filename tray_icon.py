@@ -18,7 +18,7 @@ IDM_THEME = 2003
 HOTKEY_ICONS = 1
 HOTKEY_THEME = 2
 TRAY_ICON_ID = 1
-ICON_FILE = Path(__file__).with_name('时隙.ico')
+ICON_FILE = Path(__file__).with_name('Blanket.ico')
 
 
 class TrayIcon:
@@ -101,7 +101,7 @@ class TrayIcon:
         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
         nid.uCallbackMessage = WM_TRAY
         nid.hIcon = self._icon
-        nid.szTip = '净桌面（左键切换，右键菜单）'
+        nid.szTip = 'Blanket（左键切换，右键菜单）'
         shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
 
     def _show_menu(self):

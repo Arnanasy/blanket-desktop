@@ -1,4 +1,4 @@
-"""净桌面核心边界逻辑单元测试（纯标准库，不触碰真实配置、注册表与网络）。"""
+"""Blanket 核心边界逻辑单元测试（纯标准库，不触碰真实配置、注册表与网络）。"""
 import ctypes
 import io
 import json
@@ -80,10 +80,10 @@ class TestPreferences(unittest.TestCase):
                 self.assertEqual(os.listdir(tmp), ['config.json'])
 
     def test_command_parts_detects_python_and_script_changes(self):
-        c1 = r'"C:\Program Files\Python311\pythonw.exe" "C:\Users\demo\清桌面\launch.pyw"'
-        c2 = r'"C:\Program Files\Python312\pythonw.exe" "C:\Users\demo\清桌面\launch.pyw"'
-        c3 = r'"C:\Program Files\Python311\pythonw.exe" "D:\Tools\清桌面\launch.pyw"'
-        c1_case = r'"c:\program files\python311\pythonw.exe" "c:\users\demo\清桌面\launch.pyw"'
+        c1 = r'"C:\Program Files\Python311\pythonw.exe" "C:\Users\demo\Blanket\launch.pyw"'
+        c2 = r'"C:\Program Files\Python312\pythonw.exe" "C:\Users\demo\Blanket\launch.pyw"'
+        c3 = r'"C:\Program Files\Python311\pythonw.exe" "D:\Tools\Blanket\launch.pyw"'
+        c1_case = r'"c:\program files\python311\pythonw.exe" "c:\users\demo\blanket\launch.pyw"'
 
         self.assertEqual(preferences._command_parts(c1), preferences._command_parts(c1_case))
         self.assertNotEqual(preferences._command_parts(c1), preferences._command_parts(c2))
@@ -296,6 +296,63 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         self.assertEqual(lw.current_lyric_lines(parsed, 2.0), ('', '第一句歌词'))
         self.assertEqual(lw.current_lyric_lines(parsed, 6.0), ('第一句歌词', '副歌重复'))
         self.assertEqual(lw.current_lyric_lines(parsed, 21.0), ('副歌重复', ''))
+
+    def test_resolve_on_desktop_does_not_raise_on_taskbar_click_from_app(self):
+        import desktop_widgets as dw
+
+        # 软件最大化/激活中点击任务栏或短暂无前景窗口：保持 False，绝不把时钟顶到软件最上层
+        self.assertFalse(dw.resolve_on_desktop(100, 'Shell_TrayWnd', prev_on_desktop=False))
+        self.assertFalse(dw.resolve_on_desktop(101, 'Shell_SecondaryTrayWnd', prev_on_desktop=False))
+        self.assertFalse(dw.resolve_on_desktop(0, '', prev_on_desktop=False))
+        # 切到桌面：返回 True
+        self.assertTrue(dw.resolve_on_desktop(200, 'WorkerW', prev_on_desktop=False))
+        self.assertTrue(dw.resolve_on_desktop(201, 'Progman', prev_on_desktop=False))
+        # 本来就在桌面时点任务栏：保持 True，不让挂件沉到壁纸后面
+        self.assertTrue(dw.resolve_on_desktop(100, 'Shell_TrayWnd', prev_on_desktop=True))
+        # 点回普通软件：立刻返回 False 沉底
+        self.assertFalse(dw.resolve_on_desktop(300, 'Chrome_WidgetWin_1', prev_on_desktop=True))
+
+    def test_audio_monitor_state_merge_and_lyrics_fallback(self):
+        import audio_monitor as am
+        import lyrics_widget as lw
+
+        idle = {'active': False, 'playing': False, 'title': '', 'artist': '', 'key': None}
+        paused_smtc = {'active': True, 'playing': False, 'title': '晴天', 'artist': '周杰伦', 'key': ('晴天', '周杰伦')}
+
+        # 无 SMTC 但检测到系统声音 -> 兜底活跃态
+        st = am.merge_media_and_audio_state(idle, audio_active=True, audio_assist=True)
+        self.assertTrue(st['active'] and st['playing'] and st.get('audio_fallback'))
+
+        # 声音停止后，原兜底态转为暂停态等待 pause_hide 隐身
+        st2 = am.merge_media_and_audio_state(idle, audio_active=False, audio_assist=True, prev_fallback=True)
+        self.assertTrue(st2['active'] and not st2['playing'])
+
+        # SMTC 暂停但系统仍有声音 -> 保持 playing=True 防止误隐藏
+        st3 = am.merge_media_and_audio_state(paused_smtc, audio_active=True, audio_assist=True)
+        self.assertTrue(st3['playing'])
+
+        # 关闭音频监听辅助 -> 完全按原 SMTC 状态返回
+        st4 = am.merge_media_and_audio_state(idle, audio_active=True, audio_assist=False)
+        self.assertFalse(st4['active'])
+
+        # 歌词源：优先国内源，未命中自动回退 lrclib；兜底虚拟歌名不请求网络
+        with mock.patch.object(lw, '_fetch_netease_lyrics', return_value=[(1.0, '国内歌词')]) as ne, \
+             mock.patch.object(lw, '_fetch_lrclib_lyrics', return_value=[(1.0, '海外歌词')]) as lr:
+            self.assertEqual(lw.fetch_synced_lyrics('晴天', '周杰伦'), [(1.0, '国内歌词')])
+            ne.assert_called_once()
+            lr.assert_not_called()
+
+        with mock.patch.object(lw, '_fetch_netease_lyrics', return_value=[]) as ne, \
+             mock.patch.object(lw, '_fetch_lrclib_lyrics', return_value=[(2.0, '海外回退')]) as lr:
+            self.assertEqual(lw.fetch_synced_lyrics('Song', 'Artist'), [(2.0, '海外回退')])
+            ne.assert_called_once()
+            lr.assert_called_once()
+
+        with mock.patch.object(lw, '_fetch_netease_lyrics') as ne, \
+             mock.patch.object(lw, '_fetch_lrclib_lyrics') as lr:
+            self.assertEqual(lw.fetch_synced_lyrics('系统音频播放中', '音频监听'), [])
+            ne.assert_not_called()
+            lr.assert_not_called()
 
 
 if __name__ == '__main__':

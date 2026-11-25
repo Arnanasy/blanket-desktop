@@ -25,7 +25,7 @@ def watch(stream, recover):
 
 def _log_recovery_failure(last_state):
     try:
-        log_path = Path(__file__).resolve().parent / '净桌面错误.log'
+        log_path = Path(__file__).resolve().parent / 'Blanket_error.log'
         stamp = time.strftime('%Y-%m-%d %H:%M:%S')
         with open(log_path, 'a', encoding='utf-8') as f:
             f.write(f'{stamp} [WARNING] 异常退出守护重试 15 秒后仍未能恢复桌面图标 (last_state={last_state})\n')

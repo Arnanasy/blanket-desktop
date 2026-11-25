@@ -67,23 +67,60 @@ def current_lyric_lines(lines, pos_sec):
     return cur, nxt
 
 
-def _http_json(url, timeout=5.0):
-    req = Request(url, headers={'User-Agent': 'JingZhuoMian/1.0 (Desktop Lyrics)'})
+def _http_json(url, timeout=5.0, headers=None):
+    hdrs = {'User-Agent': 'Blanket/1.0 (Desktop Lyrics)'}
+    if headers:
+        hdrs.update(headers)
+    req = Request(url, headers=hdrs)
     with urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode('utf-8', 'replace'))
+        return json.loads(resp.read(250000).decode('utf-8', 'replace'))
 
 
-def fetch_synced_lyrics(title, artist, duration=0.0):
-    """从公开免费歌词源 lrclib.net 查询同步 LRC，失败返回空列表。"""
-    clean_title = (title or '').strip()
-    clean_artist = (artist or '').strip()
-    if not clean_title:
-        return []
+def _fetch_netease_lyrics(title, artist, duration=0.0):
+    """国内免费歌词源：网易云音乐公开搜索 + 歌词接口，中文歌命中率高。"""
+    hdrs = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://music.163.com/'}
+    short_title = _CLEAN_RE.sub('', title).strip() or title
+    first_artist = re.split(r'[,/&、，]', artist)[0].strip() if artist else ''
+    queries = []
+    for q in (f'{title} {first_artist}'.strip(), f'{short_title} {first_artist}'.strip(), short_title):
+        if q and q not in queries:
+            queries.append(q)
+
+    for q in queries:
+        try:
+            data = _http_json(
+                'https://music.163.com/api/search/get/web?' + urlencode({'s': q, 'type': 1, 'limit': 5}),
+                timeout=4.5, headers=hdrs,
+            )
+            songs = data.get('result', {}).get('songs') if isinstance(data, dict) else None
+            if not isinstance(songs, list) or not songs:
+                continue
+            candidates = [s for s in songs if isinstance(s, dict) and s.get('id')]
+            if not candidates:
+                continue
+            if duration and duration > 10:
+                candidates.sort(key=lambda s: abs(float(s.get('duration') or 0) / 1000.0 - duration))
+            for song in candidates[:2]:
+                lrc_data = _http_json(
+                    f"https://music.163.com/api/song/lyric?id={song['id']}&lv=1&kv=1&tv=-1",
+                    timeout=4.5, headers=hdrs,
+                )
+                lrc_text = lrc_data.get('lrc', {}).get('lyric', '') if isinstance(lrc_data, dict) else ''
+                parsed = parse_lrc(lrc_text)
+                if parsed:
+                    return parsed
+        except Exception:
+            continue
+    return []
+
+
+def _fetch_lrclib_lyrics(title, artist, duration=0.0):
+    """海外免费歌词源 lrclib.net（作为国内源未命中时的回退）。"""
     # 1. 精确查询
     try:
-        params = {'track_name': clean_title}
-        if clean_artist:
-            params['artist_name'] = clean_artist
+        params = {'track_name': title}
+        if artist:
+            params['artist_name'] = artist
         if duration and duration > 10:
             params['duration'] = round(duration)
         data = _http_json('https://lrclib.net/api/get?' + urlencode(params))
@@ -95,8 +132,8 @@ def fetch_synced_lyrics(title, artist, duration=0.0):
         pass
 
     # 2. 模糊搜索（去掉括号副标题再试，优先选带 syncedLyrics 且时长最接近的）
-    short_title = _CLEAN_RE.sub('', clean_title).strip() or clean_title
-    first_artist = re.split(r'[,/&、，]', clean_artist)[0].strip() if clean_artist else ''
+    short_title = _CLEAN_RE.sub('', title).strip() or title
+    first_artist = re.split(r'[,/&、，]', artist)[0].strip() if artist else ''
     for q in (f'{short_title} {first_artist}'.strip(), short_title):
         try:
             items = _http_json('https://lrclib.net/api/search?' + urlencode({'q': q}))
@@ -113,6 +150,18 @@ def fetch_synced_lyrics(title, artist, duration=0.0):
         except Exception:
             continue
     return []
+
+
+def fetch_synced_lyrics(title, artist, duration=0.0):
+    """优先从国内免费源查询同步 LRC，未命中再回退到 lrclib.net；失败返回空列表。"""
+    clean_title = (title or '').strip()
+    clean_artist = (artist or '').strip()
+    if not clean_title or clean_title in ('系统音频播放中', '系统音频已暂停'):
+        return []
+    parsed = _fetch_netease_lyrics(clean_title, clean_artist, duration)
+    if parsed:
+        return parsed
+    return _fetch_lrclib_lyrics(clean_title, clean_artist, duration)
 
 
 class LyricsOverlay:

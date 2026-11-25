@@ -13,7 +13,7 @@ sys.path.insert(0, str(folder))
 log = logging.getLogger('desktop')
 log.setLevel(logging.WARNING)
 handler = RotatingFileHandler(
-    folder / '净桌面错误.log',
+    folder / 'Blanket_error.log',
     maxBytes=512000,
     backupCount=1,
     delay=True,
@@ -33,8 +33,8 @@ def report(exc_type, exc, tb):
     _notified = True
     ctypes.WinDLL('user32').MessageBoxW(
         None,
-        '净桌面遇到错误，详细信息已保存到程序文件夹内的“净桌面错误.log”。\n请把日志发来排查。',
-        '净桌面',
+        'Blanket 遇到错误，详细信息已保存到程序文件夹内的“Blanket_error.log”。\n请把日志发来排查。',
+        'Blanket',
         0x10,
     )
 

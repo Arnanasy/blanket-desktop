@@ -1,0 +1,9 @@
+# 可选但推荐：壁纸亮度采样与音乐封面圆角抗锯齿渲染
+pillow>=10.0.0
+
+# 可选但推荐：Windows 原生媒体控制（SMTC），用于桌面音乐胶囊与切歌
+winrt-runtime>=3.0.0
+winrt-Windows.Foundation>=3.0.0
+winrt-Windows.Foundation.Collections>=3.0.0
+winrt-Windows.Media.Control>=3.0.0
+winrt-Windows.Storage.Streams>=3.0.0
