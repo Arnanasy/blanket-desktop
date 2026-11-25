@@ -1,0 +1,65 @@
+name: Build & Release Windows EXE
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '可选：填写版本号（如 v1.0.0）自动创建 Release；留空则仅生成可下载的构建产物'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖与 PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: 运行单元测试
+        run: python -m unittest discover -s tests -v
+
+      - name: 打包单文件 Blanket.exe
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed ^
+            --name Blanket ^
+            --icon Blanket.ico ^
+            --add-data "Blanket.ico;." ^
+            --add-data "theme-sun.png;." ^
+            --add-data "theme-moon.png;." ^
+            --hidden-import winrt.windows.media.control ^
+            --hidden-import winrt.windows.storage.streams ^
+            --hidden-import winrt.windows.foundation ^
+            --hidden-import winrt.windows.foundation.collections ^
+            launch.pyw
+        shell: cmd
+
+      - name: 上传构建产物（可在 Actions 页面直接下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: Blanket-Windows-x64
+          path: dist/Blanket.exe
+
+      - name: 发布到 GitHub Releases（推送 v* 标签或手动填版本号时触发）
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          name: Blanket ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          generate_release_notes: true
+          files: dist/Blanket.exe

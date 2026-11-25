@@ -7,7 +7,15 @@ import winreg
 
 log = logging.getLogger('desktop')
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+IS_FROZEN = getattr(sys, 'frozen', False)
+APP_DIR = (os.path.dirname(os.path.abspath(sys.executable))
+           if IS_FROZEN else os.path.dirname(os.path.abspath(__file__)))
+RESOURCE_DIR = getattr(sys, '_MEIPASS', APP_DIR) if IS_FROZEN else APP_DIR
+
+
+def resource_path(name):
+    """返回打包或源码模式下只读资源文件（图标/图片）的绝对路径。"""
+    return os.path.join(RESOURCE_DIR, name)
 
 # ---------------------------------------------------------------- 开机自启
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
@@ -27,6 +35,8 @@ def _pythonw_path():
 
 
 def autostart_command():
+    if getattr(sys, 'frozen', False):
+        return '"{}"'.format(os.path.abspath(sys.executable))
     return '"{}" "{}"'.format(_pythonw_path(), os.path.join(APP_DIR, 'launch.pyw'))
 
 
@@ -39,14 +49,18 @@ def _registered_command():
 
 
 def _command_parts(command):
-    """从注册表命令行里取出规范化后的 (解释器路径, 脚本路径)（兼容带引号与无引号格式）。"""
+    """从注册表命令行里取出规范化后的 (解释器/exe路径, 脚本路径)（兼容打包 exe 与源码脚本）。"""
     import shlex
     try:
         parts = shlex.split(command, posix=False)
     except ValueError:
         parts = command.split()
     cleaned = [p.strip('"') for p in parts if p.strip('"')]
-    if len(cleaned) < 2:
+    if not cleaned:
+        return '', ''
+    if len(cleaned) == 1:
+        if cleaned[0].lower().endswith('.exe'):
+            return os.path.normcase(os.path.abspath(cleaned[0])), ''
         return '', ''
     return (
         os.path.normcase(os.path.abspath(cleaned[0])),

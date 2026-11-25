@@ -18,7 +18,9 @@ IDM_THEME = 2003
 HOTKEY_ICONS = 1
 HOTKEY_THEME = 2
 TRAY_ICON_ID = 1
-ICON_FILE = Path(__file__).with_name('Blanket.ico')
+from preferences import resource_path
+
+ICON_FILE = Path(resource_path('Blanket.ico'))
 
 
 class TrayIcon:

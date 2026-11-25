@@ -64,8 +64,9 @@ class ThemeButton:
         """加载日/月图标；图片缺失或损坏时返回空字典，退回文字符号显示。"""
         images = {}
         try:
+            from preferences import resource_path
             for dark, name in ((True, 'theme-moon.png'), (False, 'theme-sun.png')):
-                images[dark] = tk.PhotoImage(master=self.root, file=str(Path(__file__).with_name(name)))
+                images[dark] = tk.PhotoImage(master=self.root, file=resource_path(name))
         except tk.TclError:
             return {}
         ratio = Fraction(self.size, BASE_SIZE).limit_denominator(8)

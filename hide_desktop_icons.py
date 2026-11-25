@@ -81,7 +81,8 @@ class App:
         self._quitting = False
         self.recovery_guard = None
         try:
-            root.iconbitmap(default=str(Path(__file__).with_name('Blanket.ico')))
+            from preferences import resource_path
+            root.iconbitmap(default=resource_path('Blanket.ico'))
         except tk.TclError:
             pass
         root.title('Blanket')

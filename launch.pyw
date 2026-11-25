@@ -7,8 +7,16 @@ import sys
 
 sys.dont_write_bytecode = True
 
-folder = Path(__file__).resolve().parent
-sys.path.insert(0, str(folder))
+is_frozen = getattr(sys, 'frozen', False)
+folder = Path(sys.executable).resolve().parent if is_frozen else Path(__file__).resolve().parent
+if not is_frozen:
+    sys.path.insert(0, str(folder))
+
+# 打包为 .exe 后的异常退出守护子进程入口
+if '--recovery-watch' in sys.argv[1:]:
+    from desktop_recovery import run_watcher
+    run_watcher()
+    sys.exit(0)
 
 log = logging.getLogger('desktop')
 log.setLevel(logging.WARNING)

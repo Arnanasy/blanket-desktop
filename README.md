@@ -11,7 +11,13 @@
 - **日夜主题一键切换**：支持托盘菜单、快捷键与桌面悬浮按钮切换 Windows 浅色 / 深色模式。
 - **快捷分组栏**：隐藏桌面图标后依然可以快速打开常用工具与文件。
 
-## 环境要求与安装
+## 下载与安装
+
+### 方式一：免安装直接用（推荐给普通用户）
+
+无需安装 Python，前往右侧 **Releases** 页面下载最新版 `Blanket.exe`，放到任意文件夹后双击运行即可（个人配置会自动保存在 `Blanket.exe` 同目录的 `config.json` 中）。
+
+### 方式二：从源码运行
 
 - **系统**：Windows 10 / Windows 11
 - **Python**：Python 3.10 及以上（需包含 Tkinter，Windows 官方安装包默认自带）
@@ -22,7 +28,7 @@
 pip install -r requirements.txt
 ```
 
-## 启动方式
+## 启动方式（源码）
 
 - **日常使用**：直接双击 `Blanket.cmd`（或 `Blanket.lnk` 快捷方式），程序会静默启动并驻留在右下角系统托盘。
 - **命令行启动**：
@@ -46,3 +52,7 @@ python -m unittest discover -s tests -v
 ```
 
 > 个人配置保存在本目录 `config.json`（已通过 `.gitignore` 排除，不会泄露本机偏好与位置缓存）。
+
+## 开源协议
+
+本项目基于 [MIT License](LICENSE) 开源。

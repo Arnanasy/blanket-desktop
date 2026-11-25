@@ -8,8 +8,12 @@ import time
 
 
 def start():
+    if getattr(sys, 'frozen', False):
+        cmd = [sys.executable, '--recovery-watch']
+    else:
+        cmd = [sys.executable, '-B', str(Path(__file__).resolve()), '--watch']
     return subprocess.Popen(
-        [sys.executable, '-B', str(Path(__file__).resolve()), '--watch'],
+        cmd,
         stdin=subprocess.PIPE,
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
@@ -25,7 +29,8 @@ def watch(stream, recover):
 
 def _log_recovery_failure(last_state):
     try:
-        log_path = Path(__file__).resolve().parent / 'Blanket_error.log'
+        from preferences import APP_DIR
+        log_path = Path(APP_DIR) / 'Blanket_error.log'
         stamp = time.strftime('%Y-%m-%d %H:%M:%S')
         with open(log_path, 'a', encoding='utf-8') as f:
             f.write(f'{stamp} [WARNING] 异常退出守护重试 15 秒后仍未能恢复桌面图标 (last_state={last_state})\n')
@@ -52,8 +57,8 @@ def recover_icons():
     _log_recovery_failure(last_state)
 
 
-if __name__ == '__main__' and sys.argv[1:] == ['--watch']:
-    # pythonw 下即使传入管道，sys.stdin 也为 None，需直接取 Win32 标准输入句柄
+def run_watcher():
+    # pythonw / 打包 exe 下即使传入管道，sys.stdin 也为 None，需直接取 Win32 标准输入句柄
     from win32 import kernel32, STD_INPUT_HANDLE, INVALID_HANDLE_VALUE
 
     handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
@@ -61,6 +66,10 @@ if __name__ == '__main__' and sys.argv[1:] == ['--watch']:
         try:
             fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
         except OSError:
-            sys.exit(0)
+            return
         with os.fdopen(fd, 'rb') as pipe:
             watch(pipe, recover_icons)
+
+
+if __name__ == '__main__' and sys.argv[1:] == ['--watch']:
+    run_watcher()
