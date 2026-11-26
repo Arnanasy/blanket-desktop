@@ -11,10 +11,12 @@ import time
 import tkinter as tk
 from tkinter import colorchooser, font as tkfont, ttk
 
+from display_geometry import bounds
 from quick_hub import format_countdown
 from widget_layout import capture_anchor, clamp_to_work_area, resolve_anchor
-from win32 import (toplevel_hwnd, add_exstyle, set_click_through, place_on_desktop,
-                   WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
+from win32 import (user32, toplevel_hwnd, add_exstyle, set_click_through, place_on_desktop,
+                   WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, MF_STRING, MF_SEPARATOR,
+                   TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, WM_NULL)
 
 KEY_COLOR = '#010203'
 DRAG_THRESHOLD = 5
@@ -101,7 +103,10 @@ class CountdownWidget:
         self.label = '专注'
         self.done_until = 0.0
         self._finish_msg = ''
+        self._preview_until = 0.0
+        self._preview_msg = ''
         self._last_text = ''
+        self._last_size = (0, 0)
         self._last_alpha = None
         self._guarded = False
         self._font_key = None
@@ -111,6 +116,7 @@ class CountdownWidget:
         self._drag_origin = None
         self._drag_offset = None
         self._dragging = False
+        self.menu_open = False
         self.dialog = None
         self._dlg_vars = {}
 
@@ -151,6 +157,7 @@ class CountdownWidget:
         self.end_at = time.monotonic() + mins * 60.0
         self.paused_rem = 0.0
         self.done_until = 0.0
+        self._preview_until = 0.0
         self._last_text = ''
 
     def toggle_pause(self):
@@ -161,18 +168,22 @@ class CountdownWidget:
         elif self.paused_rem > 0:
             self.end_at = now + self.paused_rem
             self.paused_rem = 0.0
+        self._preview_until = 0.0
         self._last_text = ''
 
     def cancel(self):
         self.end_at = 0.0
         self.paused_rem = 0.0
         self.done_until = 0.0
+        self._preview_until = 0.0
         self._last_text = ''
         if self.win.winfo_viewable():
             self.win.withdraw()
 
     def current_text(self, now=None):
         now_t = time.monotonic() if now is None else now
+        if self._preview_until > now_t and self._preview_msg:
+            return f'🔔 {self._preview_msg}'
         if self.paused_rem > 0:
             return format_countdown(self.paused_rem, f'{self.label}(暂停)')
         if self.end_at > 0:
@@ -184,19 +195,30 @@ class CountdownWidget:
         return ''
 
     # ------------------------------------------------------------ 绘制与布局
-    def _ensure_font(self):
-        key = self.prefs['size']
+    def _ensure_font(self, size_override=None):
+        key = size_override or self.prefs['size']
         if key != self._font_key:
             self._font = tkfont.Font(family='Microsoft YaHei UI', size=key, weight='bold')
             self._font_key = key
 
     def _render(self, text):
-        self._ensure_font()
-        pad_x = max(14, round(self.prefs['size'] * 0.75))
-        pad_y = max(8, round(self.prefs['size'] * 0.42))
+        base_size = self.prefs['size']
+        self._ensure_font(base_size)
+        l, _t, r, _b = bounds(self.pos[0] + 40, self.pos[1] + 20, work=True)
+        max_w = max(220, (r - l) - 24)
+        pad_x = max(14, round(base_size * 0.75))
+        pad_y = max(8, round(base_size * 0.42))
         tw = self._font.measure(text)
+        # 超长句子在大字号下超出单屏工作区宽度时，自动自适应微缩字号以保证整句完整显示不溢出
+        if tw + pad_x * 2 > max_w and base_size > 14:
+            ratio = (max_w - pad_x * 2) / max(1, tw)
+            fit_size = max(14, int(base_size * ratio))
+            self._ensure_font(fit_size)
+            pad_x = max(12, round(fit_size * 0.75))
+            pad_y = max(7, round(fit_size * 0.42))
+            tw = self._font.measure(text)
         th = self._font.metrics('linespace')
-        w = max(120, tw + pad_x * 2)
+        w = min(max_w, max(120, tw + pad_x * 2))
         h = th + pad_y * 2
 
         alpha = self.prefs['opacity'] / 100.0
@@ -212,10 +234,10 @@ class CountdownWidget:
         fg = self.prefs['done_fg'] if is_done else self.prefs['fg']
         bg = self.prefs['bg']
         if self.prefs['style'] == '圆角卡片':
-            r = min(16, h // 2)
+            rad = min(16, h // 2)
             c.create_polygon(
-                r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
-                w - r, h, r, h, 0, h, 0, h - r, 0, r, 0, 0,
+                rad, 0, w - rad, 0, w, 0, w, rad, w, h - rad, w, h,
+                w - rad, h, rad, h, 0, h, 0, h - rad, 0, rad, 0, 0,
                 smooth=True, splinesteps=20, fill=bg, outline='#475569',
             )
             c.create_text(w / 2, h / 2, text=text, font=self._font, fill=fg, anchor='center')
@@ -224,12 +246,17 @@ class CountdownWidget:
                 c.create_text(w / 2 + dx, h / 2 + dy, text=text, font=self._font, fill='#0b0f19', anchor='center')
             c.create_text(w / 2, h / 2, text=text, font=self._font, fill=fg, anchor='center')
 
+        size_changed = (w, h) != self._last_size
+        self._last_size = (w, h)
+        return size_changed
+
     def relayout(self, on_desktop=False):
         if not self.win.winfo_viewable():
             return
-        w, h = self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight()
+        w, h = self._last_size if self._last_size[0] > 0 else (self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight())
         x, y = resolve_anchor(self.anchor, self.pos, w, h, margin=8)
-        self.pos = [x, y]
+        if self.anchor is not None:
+            self.pos = [x, y]
         place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop)
 
     # ------------------------------------------------------------ 交互（自由拖动 / 滚轮 / 右键 / 设置窗）
@@ -258,11 +285,15 @@ class CountdownWidget:
         self._drag_origin = None
         self._drag_offset = None
         self._dragging = False
+        now = time.monotonic()
         if was_drag:
-            w, h = self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight()
+            w, h = self._last_size if self._last_size[0] > 0 else (self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight())
             self.anchor = capture_anchor(self.pos[0], self.pos[1], w, h)
             self.on_save()
-        elif not self.active and self.done_until > time.monotonic():
+        elif self._preview_until > now:
+            self._preview_until = 0.0
+            self._last_text = ''
+        elif not self.active and self.done_until > now:
             # 到点提示语出现期间，轻点一下即可提前关闭
             self.done_until = 0.0
             self._last_text = ''
@@ -371,8 +402,8 @@ class CountdownWidget:
 
         def test_quote():
             save_quotes()
-            self._finish_msg = pick_finish_quote(self.quotes, self._finish_msg)
-            self.done_until = time.monotonic() + 6.0
+            self._preview_msg = pick_finish_quote(self.quotes, self._preview_msg or self._finish_msg)
+            self._preview_until = time.monotonic() + 5.0
             self._last_text = ''
 
         def on_close():
@@ -390,19 +421,41 @@ class CountdownWidget:
     def _on_right_click(self, e):
         if self._guarded:
             return
-        menu = tk.Menu(self.win, tearoff=0)
-        if self.active:
-            menu.add_command(label='继续倒计时' if self.paused_rem > 0 else '暂停倒计时',
-                             command=self.toggle_pause)
-        menu.add_command(label='外观与提示语设置…', command=self.open_settings)
-        next_style = STYLES[1] if self.prefs['style'] == STYLES[0] else STYLES[0]
-        menu.add_command(label=f'快速切换为{next_style}', command=self._toggle_style)
-        menu.add_separator()
-        menu.add_command(label='关闭倒计时', command=self.widgets.cancel_countdown)
+        ID_PAUSE, ID_SETTINGS, ID_STYLE, ID_CANCEL = 4101, 4102, 4103, 4104
+        menu = user32.CreatePopupMenu()
+        if not menu:
+            return
+        owner = getattr(getattr(self.widgets.app, 'tray', None), 'hwnd', None) or toplevel_hwnd(self.root)
+        cmd = 0
+        self.menu_open = True
         try:
-            menu.tk_popup(e.x_root, e.y_root)
+            if self.active:
+                lbl = '继续倒计时' if self.paused_rem > 0 else '暂停倒计时'
+                user32.AppendMenuW(menu, MF_STRING, ID_PAUSE, lbl)
+            user32.AppendMenuW(menu, MF_STRING, ID_SETTINGS, '外观与提示语设置…')
+            next_style = STYLES[1] if self.prefs['style'] == STYLES[0] else STYLES[0]
+            user32.AppendMenuW(menu, MF_STRING, ID_STYLE, f'快速切换为{next_style}')
+            user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+            user32.AppendMenuW(menu, MF_STRING, ID_CANCEL, '关闭倒计时')
+            user32.SetForegroundWindow(owner)
+            cmd = user32.TrackPopupMenu(
+                menu, TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_RETURNCMD,
+                int(e.x_root), int(e.y_root), 0, owner, None,
+            )
+            user32.PostMessageW(owner, WM_NULL, 0, 0)
         finally:
-            menu.grab_release()
+            user32.DestroyMenu(menu)
+            self.menu_open = False
+            self.widgets.app.discard_mouse()
+
+        if cmd == ID_PAUSE:
+            self.toggle_pause()
+        elif cmd == ID_SETTINGS:
+            self.open_settings()
+        elif cmd == ID_STYLE:
+            self._toggle_style()
+        elif cmd == ID_CANCEL:
+            self.widgets.cancel_countdown()
 
     # ------------------------------------------------------------ 主循环调度
     def tick(self, now, blocked, on_desktop=False, force_restack=False, guard=False):
@@ -420,21 +473,24 @@ class CountdownWidget:
             self._guarded = bool(guard)
             set_click_through(self.hwnd, self._guarded)
 
+        previewing = self._preview_until > now and bool(self._preview_msg)
         text = self.current_text(now)
         should_show = bool(text) and not blocked
         visible = bool(self.win.winfo_viewable())
 
         if should_show:
+            size_changed = False
             if text != self._last_text:
                 self._last_text = text
-                self._render(text)
-            if not visible or force_restack:
-                w, h = self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight()
+                size_changed = self._render(text)
+            if not visible or force_restack or (size_changed and not self._dragging):
+                w, h = self._last_size if self._last_size[0] > 0 else (self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight())
                 x, y = resolve_anchor(self.anchor, self.pos, w, h, margin=8)
-                self.pos = [x, y]
+                if self.anchor is not None:
+                    self.pos = [x, y]
                 if not visible:
                     self.win.geometry(f'{x:+d}{y:+d}')
-                place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop, show=True)
+                place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop or previewing, show=not visible or force_restack)
                 set_click_through(self.hwnd, self._guarded)
         elif visible:
             self.win.withdraw()

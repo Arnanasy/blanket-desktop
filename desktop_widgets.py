@@ -202,7 +202,7 @@ class Widgets:
 
     @property
     def busy(self):
-        return self.bar.busy
+        return bool(self.bar.busy or getattr(self.countdown, 'menu_open', False))
 
     @property
     def guard_active(self):
@@ -439,6 +439,8 @@ class Widgets:
         toolbar = ttk.Frame(w)
         toolbar.pack(fill='x', padx=16, pady=(8, 0))
         ttk.Button(toolbar, text='音乐胶囊设置…', command=self.media.open_settings).pack(side='left')
+        ttk.Button(toolbar, text='番茄钟设置…', command=self.countdown.open_settings).pack(side='left', padx=(8, 0))
+        ttk.Button(toolbar, text='系统监控设置…', command=self.monitor.settings).pack(side='left', padx=(8, 0))
         ttk.Button(toolbar, text='退出 Blanket', command=self.app.quit_app).pack(side='right')
         pane = ttk.Frame(w, padding=16)
         pane.pack(fill='both', expand=True)
@@ -612,7 +614,9 @@ class Widgets:
         self.place_clock(self.clock.winfo_x(), self.clock.winfo_y(), snap=True)
         pos = self._saved_position()
         self.cfg['anchor'] = capture_anchor(pos[0], pos[1], self.clock.winfo_reqwidth(), self.clock.winfo_reqheight())
-        user32.SetWindowPos(self.clock_hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+        # 拖放松手后置于桌面与动态壁纸（如 Wallpaper Engine）正上方，切回普通软件时再由 tick 自动沉底
+        place_on_desktop(self.clock_hwnd, pos[0], pos[1], on_desktop=True)
+        self._was_on_desktop = True
         self.save()
         self.sample_wallpaper()
 
@@ -621,7 +625,7 @@ class Widgets:
         x, y = resolve_anchor(self.cfg.get('anchor'), self._saved_position(), width, height)
         self.cfg['position'] = [x, y]
         if self.clock.winfo_viewable():
-            user32.SetWindowPos(self.clock_hwnd, HWND_BOTTOM, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+            place_on_desktop(self.clock_hwnd, x, y, on_desktop=self._was_on_desktop)
 
     def _show_clock(self, on_desktop=False):
         width, height = self.clock.winfo_reqwidth(), self.clock.winfo_reqheight()

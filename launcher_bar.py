@@ -15,10 +15,10 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 from display_geometry import bounds
 from preferences import APP_DIR
 from quick_hub import (MAX_NOTES, MAX_NOTE_LEN, KeepAwake, copy_file_to_clipboard,
-                       launch_deskkit, reveal_in_explorer, sanitize_notes,
-                       scan_recent_files, turn_off_monitors)
-from win32 import (user32, GetWindowLongPtr, SetWindowLongPtr, add_exstyle, toplevel_hwnd,
-                   GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
+                       copy_path_to_clipboard, launch_deskkit, reveal_in_explorer,
+                       sanitize_notes, scan_recent_files, turn_off_monitors)
+from win32 import (user32, GetWindowLongPtr, SetWindowLongPtr, add_exstyle, is_own_window,
+                   toplevel_hwnd, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
 
 BAR_BG = '#0F172A'
 CARD_BG = '#1E293B'
@@ -99,8 +99,10 @@ class LauncherBar:
         self.groups_section_open = False
         self.busy = False            # 模态对话框打开期间为 True：不收起、不响应桌面点击
         self._note_focused = False   # 正在便签输入框打字时保持抽屉展开，绝不吞字
-        self._note_last_input = 0.0  # 最近一次在便签输入框敲字或点击的时刻，防焦点卡死不收起
+        self._note_focus_at = 0.0    # 点击激活便签输入框的时刻（提供前台切换宽限期）
+        self._note_last_input = 0.0  # 最近一次在便签输入框敲字或上屏的时刻
         self._note_draft = tk.StringVar(master=widgets.root, value='')
+        self._note_draft.trace_add('write', lambda *_: setattr(self, '_note_last_input', time.monotonic()))
 
         self.awake = KeepAwake()
         self.fresh_files = []
@@ -114,6 +116,12 @@ class LauncherBar:
         self.awake_btn = None
         self.countdown_label = None
         self.files_box = None
+        self.scroll_canvas = None
+        self.scrollbar = None
+        self.body = None
+        self.foot = None
+        self._body_win_id = None
+        self._scrollable = False
 
         self.win = tk.Toplevel(widgets.root)
         self.win.withdraw()
@@ -159,14 +167,37 @@ class LauncherBar:
             parts.append(' '.join(styles))
         return tuple(parts)
 
-    def _card(self, title=None):
+    def _card(self, title=None, action_text=None, action_cmd=None):
         cbg = self._c('card_bg')
-        frame = tk.Frame(self.win, bg=cbg, padx=10, pady=8)
+        parent = self.body if self.body is not None else self.win
+        frame = tk.Frame(parent, bg=cbg, padx=10, pady=8)
         frame.pack(fill='x', padx=8, pady=(6, 0))
         if title:
-            tk.Label(frame, text=title, bg=cbg, fg=self._c('muted_fg'),
-                     font=self._f(-1, bold=True), anchor='w').pack(fill='x', pady=(0, 4))
+            hdr = tk.Frame(frame, bg=cbg)
+            hdr.pack(fill='x', pady=(0, 4))
+            tk.Label(hdr, text=title, bg=cbg, fg=self._c('muted_fg'),
+                     font=self._f(-1, bold=True), anchor='w').pack(side='left', fill='x', expand=True)
+            if action_text and action_cmd:
+                tk.Button(
+                    hdr, text=action_text, command=action_cmd,
+                    bg=cbg, fg=self._c('accent'), activebackground=self._c('item_bg'),
+                    activeforeground=self._c('fg'), font=self._f(-1), relief='flat',
+                    borderwidth=0, padx=4, pady=0, cursor='hand2',
+                ).pack(side='right')
         return frame
+
+    def _on_mousewheel(self, event):
+        if self._scrollable and self.scroll_canvas is not None and event.delta:
+            self.scroll_canvas.yview_scroll(-1 if event.delta > 0 else 1, 'units')
+            return 'break'
+
+    def _bind_scroll_tree(self, widget):
+        try:
+            widget.bind('<MouseWheel>', self._on_mousewheel, add='+')
+            for child in widget.winfo_children():
+                self._bind_scroll_tree(child)
+        except tk.TclError:
+            pass
 
     def _pill_btn(self, parent, text, command, bg=None, fg=None):
         bg = self._c('item_bg') if bg is None else bg
@@ -195,6 +226,30 @@ class LauncherBar:
         for child in self.win.winfo_children():
             child.destroy()
 
+        # 底部紧凑控制入口固定吸底，保证字号调大或便签较多时永远不会被挤出窗口外
+        foot = self.foot = tk.Frame(self.win, bg=bg, padx=8, pady=8)
+        foot.pack(side='bottom', fill='x')
+        foot.columnconfigure((0, 1, 2), weight=1, uniform='fbtn')
+        self._pill_btn(foot, '⚙️ 主面板', self.app.open_settings).grid(row=0, column=0, sticky='ew', padx=(0, 2))
+        self._pill_btn(foot, '🎨 组件', self.widgets.settings).grid(row=0, column=1, sticky='ew', padx=2)
+        self._pill_btn(foot, '🖌️ 外观', self.open_style_settings).grid(row=0, column=2, sticky='ew', padx=(2, 0))
+
+        # 中部自适应滚动区（未超高时不显示滚动条，超高时支持滚轮与窄滚动条浏览）
+        scroll_wrap = tk.Frame(self.win, bg=bg)
+        scroll_wrap.pack(side='top', fill='both', expand=True)
+        self.scrollbar = tk.Scrollbar(
+            scroll_wrap, orient='vertical', width=8,
+            bg=ibg, troughcolor=bg, activebackground=acc, highlightthickness=0, bd=0,
+        )
+        self.scroll_canvas = tk.Canvas(
+            scroll_wrap, bg=bg, highlightthickness=0, bd=0,
+            yscrollcommand=self.scrollbar.set, yscrollincrement=24,
+        )
+        self.scrollbar.configure(command=self.scroll_canvas.yview)
+        self.scroll_canvas.pack(side='left', fill='both', expand=True)
+        self.body = tk.Frame(self.scroll_canvas, bg=bg)
+        self._body_win_id = self.scroll_canvas.create_window((0, 0), window=self.body, anchor='nw')
+
         # 1. 顶部快捷控制开关（2x2 网格）
         top_card = self._card('快捷开关')
         grid = tk.Frame(top_card, bg=cbg)
@@ -222,9 +277,13 @@ class LauncherBar:
         dk_btn.grid(row=1, column=1, sticky='ew', padx=(3, 0))
         dk_btn.bind('<Button-3>', lambda _e: self._pick_deskkit_path())
 
-        # 2. 独立可拖动番茄钟 / 倒计时
-        cd_card = self._card('🍅 番茄钟（开启后可自由拖动）')
+        # 2. 独立可拖动番茄钟 / 倒计时（附带快捷外观与提示语设置入口）
         cd_widget = getattr(self.widgets, 'countdown', None)
+        cd_card = self._card(
+            '🍅 番茄钟（开启后可拖动）',
+            action_text='⚙ 设置' if cd_widget is not None else None,
+            action_cmd=(cd_widget.open_settings if cd_widget is not None else None),
+        )
         if cd_widget is not None and cd_widget.active:
             row = tk.Frame(cd_card, bg=cbg)
             row.pack(fill='x')
@@ -247,7 +306,7 @@ class LauncherBar:
                 b = self._pill_btn(t_row, lbl, cmd)
                 b.grid(row=0, column=idx, sticky='ew', padx=2)
 
-        # 3. 最新文件速取（自动扫描下载与桌面 Top 5，支持一键复制文件本体直接去微信 Ctrl+V 粘贴）
+        # 3. 最新文件速取（自动扫描下载与桌面 Top 5，左键点复制可粘贴到聊天/网页/AI，右键点复制取路径）
         files_card = self._card('⚡ 最新文件（左键打开 · 右键定位 · 点复制去粘贴）')
         self.files_box = tk.Frame(files_card, bg=cbg)
         self.files_box.pack(fill='x')
@@ -278,6 +337,7 @@ class LauncherBar:
             entry.pack(side='left', fill='x', expand=True, ipady=4, padx=(0, 4))
             entry.bind('<Button-1>', lambda _e, w=entry: self._focus_note_entry(w))
             entry.bind('<Key>', lambda _e: setattr(self, '_note_last_input', time.monotonic()))
+            entry.bind('<KeyRelease>', lambda _e: setattr(self, '_note_last_input', time.monotonic()))
             entry.bind('<FocusIn>', lambda _e: self._on_note_focus_in())
             entry.bind('<FocusOut>', lambda _e: setattr(self, '_note_focused', False))
             entry.bind('<Return>', lambda _e: self._add_note())
@@ -321,14 +381,7 @@ class LauncherBar:
                     self._pill_btn(act_r, '＋文件夹', lambda n=name: self.add(n, True)).pack(side='left', expand=True, fill='x', padx=(2, 0))
             self._pill_btn(grp_card, '＋ 新建分组', self.create_group).pack(fill='x', pady=(4, 0))
 
-        # 6. 底部紧凑控制入口（主面板 / 组件设置 / 面板外观）
-        foot = tk.Frame(self.win, bg=bg, padx=8, pady=8)
-        foot.pack(fill='x')
-        foot.columnconfigure((0, 1, 2), weight=1, uniform='fbtn')
-        self._pill_btn(foot, '⚙️ 主面板', self.app.open_settings).grid(row=0, column=0, sticky='ew', padx=(0, 2))
-        self._pill_btn(foot, '🎨 组件', self.widgets.settings).grid(row=0, column=1, sticky='ew', padx=2)
-        self._pill_btn(foot, '🖌️ 外观', self.open_style_settings).grid(row=0, column=2, sticky='ew', padx=(2, 0))
-
+        self._bind_scroll_tree(self.scroll_canvas)
         self.win.update_idletasks()
 
     def open_style_settings(self):
@@ -481,14 +534,20 @@ class LauncherBar:
 
     # ------------------------------------------------------------ 便签动作
     def _on_note_focus_in(self):
+        now = time.monotonic()
         self._note_focused = True
-        self._note_last_input = time.monotonic()
+        self._note_focus_at = now
+        self._note_last_input = now
 
     def _focus_note_entry(self, entry_widget):
+        now = time.monotonic()
         self._note_focused = True
-        self._note_last_input = time.monotonic()
-        self.last_inside = time.monotonic()
+        self._note_focus_at = now
+        self._note_last_input = now
+        self.last_inside = now
         self._set_noactivate(False)
+        if self.hwnd:
+            user32.SetForegroundWindow(self.hwnd)
         try:
             entry_widget.focus_force()
         except tk.TclError:
@@ -532,6 +591,18 @@ class LauncherBar:
                 if btn_widget.winfo_exists() else None
             ))
 
+    def _copy_path_item(self, path_str, btn_widget):
+        if not copy_path_to_clipboard(path_str, self.hwnd):
+            self._show_error(f'无法复制路径（文件可能已被移动或删除）：\n{path_str}')
+            self._refresh_recent_files(force=True)
+            return
+        if btn_widget and btn_widget.winfo_exists():
+            btn_widget.configure(text='✓ 路径', bg=GREEN_ACTIVE, fg='white')
+            self.win.after(1200, lambda: (
+                btn_widget.configure(text='复制', bg=self._c('item_bg'), fg=self._c('fg'))
+                if btn_widget.winfo_exists() else None
+            ))
+
     def _populate_files_box(self):
         if self.files_box is None or not self.files_box.winfo_exists():
             return
@@ -543,8 +614,10 @@ class LauncherBar:
         for child in self.files_box.winfo_children():
             child.destroy()
         if not self.fresh_files:
-            tk.Label(self.files_box, text='桌面与下载暂无近期新文件', bg=cbg, fg=mfg,
-                     font=self._f(-1), anchor='w').pack(fill='x', pady=2)
+            lbl = tk.Label(self.files_box, text='桌面与下载暂无近期新文件', bg=cbg, fg=mfg,
+                           font=self._f(-1), anchor='w')
+            lbl.pack(fill='x', pady=2)
+            self._bind_scroll_tree(lbl)
             return
         for item in self.fresh_files:
             row = tk.Frame(self.files_box, bg=cbg)
@@ -564,7 +637,9 @@ class LauncherBar:
                 font=self._f(-1), relief='flat', padx=6, pady=4, cursor='hand2',
             )
             cp_btn.configure(command=lambda p=item['path'], b=cp_btn: self._copy_file_item(p, b))
+            cp_btn.bind('<Button-3>', lambda _e, p=item['path'], b=cp_btn: self._copy_path_item(p, b))
             cp_btn.pack(side='right')
+            self._bind_scroll_tree(row)
 
     def _refresh_recent_files(self, force=False):
         now = time.monotonic()
@@ -592,14 +667,41 @@ class LauncherBar:
             self.theme_item.configure(text=('☀ 切浅色' if dark else '☾ 切深色'))
 
     def recolor(self, accent):
-        self.render()
-        self._refresh_if_visible()
+        """快捷中枢使用自身独立外观配色（self.style），忽略系统强调色轮询以避免重建打断便签输入。"""
+        return
 
     def _reposition(self, anchor_x, anchor_y):
-        """按所在显示器工作区重新计算启动栏尺寸并贴右边缘居中定位。"""
+        """按所在显示器工作区重新计算启动栏尺寸、自适应启用滚动并贴右边缘居中定位。"""
+        self.win.update_idletasks()
         wl, wt, wr, wb = bounds(anchor_x, anchor_y, work=True)
-        width = max(self.win.winfo_reqwidth(), round(300 * self.widgets.ui_scale))
-        height = min(self.win.winfo_reqheight(), max(200, wb - wt - 16))
+        max_win_h = max(220, wb - wt - 16)
+        min_w = round(300 * self.widgets.ui_scale)
+
+        if self.body is not None and self.foot is not None and self.scroll_canvas is not None:
+            body_w = self.body.winfo_reqwidth()
+            body_h = self.body.winfo_reqheight()
+            foot_w = self.foot.winfo_reqwidth()
+            foot_h = self.foot.winfo_reqheight()
+            total_h = body_h + foot_h + 4
+            need_scroll = total_h > max_win_h
+            self._scrollable = need_scroll
+            bar_w = 10 if need_scroll else 0
+            width = max(body_w + bar_w, foot_w, min_w)
+            height = min(total_h, max_win_h)
+            if need_scroll:
+                if not self.scrollbar.winfo_ismapped():
+                    self.scrollbar.pack(side='right', fill='y', padx=(0, 2), pady=(6, 0))
+            else:
+                if self.scrollbar.winfo_ismapped():
+                    self.scrollbar.pack_forget()
+                self.scroll_canvas.yview_moveto(0.0)
+            inner_w = max(120, width - bar_w - 2)
+            self.scroll_canvas.itemconfigure(self._body_win_id, width=inner_w)
+            self.scroll_canvas.configure(scrollregion=(0, 0, inner_w, body_h))
+        else:
+            width = max(self.win.winfo_reqwidth(), min_w)
+            height = min(self.win.winfo_reqheight(), max_win_h)
+
         self.win.geometry(f'{width}x{height}+{wr - width}+{wt + max(0, (wb - wt - height) // 2)}')
 
     def _refresh_if_visible(self):
@@ -746,11 +848,14 @@ class LauncherBar:
             if inside or editing_style:
                 self.last_inside = now
             if self._note_focused:
-                # 防止无边框窗口收不到 FocusOut 导致永远不隐藏：
-                # 只要前景不再是本抽屉、或鼠标在抽屉外按下左键、或鼠标在抽屉外且超过 2.5 秒未敲字，立即释放焦点锁
-                fg_lost = user32.GetForegroundWindow() != self.hwnd
+                # 防止无边框窗口收不到 FocusOut 导致永远不隐藏，同时保护中文输入法选词与思考停顿：
+                # 激活后 0.6s 内提供焦点建立宽限；有草稿文字时不因鼠标移出而超时收起；点击窗外或切走前台立即收起
+                fg = user32.GetForegroundWindow()
+                grace = (now - self._note_focus_at) < 0.6
+                fg_lost = (not grace) and bool(fg) and (fg != self.hwnd) and (not is_own_window(fg))
                 clicked_out = (not inside) and mouse_held
-                idle_typing = (not inside) and (now - self._note_last_input > 2.5)
+                has_draft = bool(self._note_draft.get().strip())
+                idle_typing = (not inside) and (not has_draft) and (now - self._note_last_input > 30.0)
                 if fg_lost or clicked_out or idle_typing:
                     self._note_focused = False
                     self._set_noactivate(True)

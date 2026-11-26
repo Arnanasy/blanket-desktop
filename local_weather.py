@@ -8,10 +8,20 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 CACHE_SECONDS = 900          # 天气缓存有效期（15 分钟）
+_TEMP_NUM_RE = re.compile(r'-?\d+(?:\.\d+)?')
 
 
 def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _format_temp_range(t1, t2):
+    """将接口返回的两个温度按低温在前、高温在后排列（兼容负温与单位后缀）。"""
+    s1, s2 = str(t1 or '').strip(), str(t2 or '').strip()
+    m1, m2 = _TEMP_NUM_RE.search(s1), _TEMP_NUM_RE.search(s2)
+    if m1 and m2 and float(m1.group()) > float(m2.group()):
+        s1, s2 = s2, s1
+    return f'{s1}–{s2}'
 
 
 def _today_cn_dates():
@@ -106,7 +116,7 @@ def domestic_weather(previous):
         forecast = json.loads(domestic_text(f'https://www.weather.com.cn/data/cityinfo/{code}.html'))['weatherinfo']
         # 该接口偶尔返回历史归档预报，仅当日匹配时才拼接高低温
         if forecast.get('date_y') in _today_cn_dates():
-            line += f" · {forecast['temp1']}–{forecast['temp2']}"
+            line += f" · {_format_temp_range(forecast['temp1'], forecast['temp2'])}"
     except (OSError, ValueError, KeyError, IndexError):
         pass
     return dict(place=city, line=line, station=code, source='中国天气网', updated=now)

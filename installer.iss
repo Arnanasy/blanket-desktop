@@ -46,4 +46,19 @@ Type: files; Name: "{app}\Blanket_error.log*"
 Type: files; Name: "{app}\config.json"
 
 [UninstallRun]
-Filename: "{cmd}"; Parameters: "/C reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v Blanket /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v JingZhuoMian /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"" /v Blanket /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"" /v JingZhuoMian /f >nul 2>&1"; Flags: runhidden
+Filename: "{app}\Blanket.exe"; Parameters: "--restore-icons"; Flags: runhidden waituntilterminated; RunOnceId: "RestoreDesktopIcons"
+Filename: "{cmd}"; Parameters: "/C reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v Blanket /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v JingZhuoMian /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"" /v Blanket /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"" /v JingZhuoMian /f >nul 2>&1"; Flags: runhidden; RunOnceId: "CleanAutostartRegistry"
+
+[Code]
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+  OldExe: String;
+begin
+  if CurStep = ssInstall then
+  begin
+    OldExe := ExpandConstant('{app}\Blanket.exe');
+    if FileExists(OldExe) then
+      Exec(OldExe, '--restore-icons', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;

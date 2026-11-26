@@ -569,9 +569,18 @@ def _signal_running_instance(mutex, event_names=(EVENT_NAME, LEGACY_EVENT_NAME))
 
 
 def main():
+    args = {a.lower() for a in sys.argv[1:]}
+    if '--restore-icons' in args:
+        desktop_recovery.recover_icons()
+        return
+    start_minimized = ('--minimized' in args) or ('-m' in args)
+
     legacy_mutex = kernel32.CreateMutexW(None, False, LEGACY_MUTEX_NAME)
     if legacy_mutex and ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-        _signal_running_instance(legacy_mutex, (LEGACY_EVENT_NAME, EVENT_NAME))
+        if start_minimized:
+            kernel32.CloseHandle(legacy_mutex)
+        else:
+            _signal_running_instance(legacy_mutex, (LEGACY_EVENT_NAME, EVENT_NAME))
         return
     if legacy_mutex:
         kernel32.CloseHandle(legacy_mutex)
@@ -580,7 +589,10 @@ def main():
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-        _signal_running_instance(mutex)
+        if start_minimized:
+            kernel32.CloseHandle(mutex)
+        else:
+            _signal_running_instance(mutex)
         return
 
     # 主实例：创建自动复位的唤起事件（manualReset=False）
@@ -592,6 +604,8 @@ def main():
 
     try:
         root = tk.Tk()
+        if start_minimized:
+            root.withdraw()
         guard = desktop_recovery.start()
         app = App(root, show_event)
         app.recovery_guard = guard
@@ -604,6 +618,8 @@ def main():
         x = (root.winfo_screenwidth() - w) // 2
         y = (screen_h - h) // 4
         root.geometry(f'{w}x{h}+{x}+{y}')
+        if start_minimized:
+            root.withdraw()
         root.mainloop()
     finally:
         kernel32.CloseHandle(show_event)

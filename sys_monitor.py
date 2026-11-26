@@ -342,7 +342,12 @@ class SystemMonitor:
     def wheel(self, event):
         if self._click_through or not event.delta:
             return
-        key, step, lo, hi = ('size', 1, 9, 48) if event.state & 4 else ('alpha', 5, 30, 100)
+        if event.state & 4:       # Ctrl + 滚轮调字号
+            key, step, lo, hi = ('size', 1, 9, 48)
+        elif event.state & 1:     # Shift + 滚轮调不透明度（防止裸滚轮误触）
+            key, step, lo, hi = ('alpha', 5, 30, 100)
+        else:
+            return
         self.cfg[key] = max(lo, min(hi, self.cfg[key] + (step if event.delta > 0 else -step)))
         if key in self.controls:
             self.controls[key].set(self.cfg[key])
@@ -414,8 +419,9 @@ class SystemMonitor:
                     self.win.after_cancel(self.save_timer)
                 self.flush_save()
 
-        d.protocol('WM_DELETE_WINDOW', lambda: finish(False))
-        d.bind('<Escape>', lambda _e: finish(False))
+        # 与其余设置窗口一致：右上角关闭自动保留当前实时调整后的外观
+        d.protocol('WM_DELETE_WINDOW', lambda: finish(True))
+        d.bind('<Escape>', lambda _e: finish(True))
 
         def change(*_args):
             if self.dialog is not d:
@@ -464,11 +470,18 @@ class SystemMonitor:
         variables['ping_host'] = tk.StringVar(value=self.cfg['ping_host'])
         ttk.Entry(ping_row, textvariable=variables['ping_host'], width=14).pack(side='left', fill='x', expand=True)
 
-        ttk.Label(box, text='与启动栏共用右边缘时，监控占上半段。').pack(pady=5)
+        def reset_default():
+            for k, val in self.defaults.items():
+                if k in variables:
+                    variables[k].set(val)
+            change()
+
+        ttk.Label(box, text='提示：Ctrl+滚轮调大小 · Shift+滚轮调不透明度').pack(pady=(5, 2))
+        ttk.Label(box, text='与启动栏共用右边缘时，监控占上半段。').pack(pady=(0, 4))
         actions = ttk.Frame(box)
         actions.pack(fill='x', pady=6)
-        ttk.Button(actions, text='取消', command=lambda: finish(False)).pack(side='right')
-        ttk.Button(actions, text='确定', command=lambda: finish(True)).pack(side='right', padx=5)
+        ttk.Button(actions, text='恢复默认', command=reset_default).pack(side='left')
+        ttk.Button(actions, text='完成（已自动保存）', command=lambda: finish(True)).pack(side='right')
 
     def raise_(self):
         """将监控窗口保持在所有普通/无边框全屏窗口最顶层，且不抢焦点。"""

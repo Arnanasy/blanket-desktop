@@ -12,10 +12,14 @@ folder = Path(sys.executable).resolve().parent if is_frozen else Path(__file__).
 if not is_frozen:
     sys.path.insert(0, str(folder))
 
-# 打包为 .exe 后的异常退出守护子进程入口
+# 打包为 .exe 后的异常退出守护与卸载恢复图标子进程入口
 if '--recovery-watch' in sys.argv[1:]:
     from desktop_recovery import run_watcher
     run_watcher()
+    sys.exit(0)
+if '--restore-icons' in sys.argv[1:]:
+    from desktop_recovery import recover_icons
+    recover_icons()
     sys.exit(0)
 
 log = logging.getLogger('desktop')

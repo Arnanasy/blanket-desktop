@@ -639,6 +639,259 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         self.assertEqual(bs['bg'], lb.BAR_STYLE_DEFAULTS['bg'])
         self.assertEqual(bs['card_bg'], '#FFFFFF')
 
+    def test_audit_fixes_clipboard_formats_dual_monitor_weather_lyrics_and_autostart(self):
+        """覆盖深度体检修复项：多格式文件剪贴板(网页/AI软件兼容)、双屏防溢出、20端口探针、静默自启、歌词断网重试与温度排序。"""
+        import countdown_widget as cw
+        import lyrics_widget as lw
+        import quick_hub as qh
+        import theme_button as tb
+        import widget_layout as wl
+
+        # 1. 开机自启默认携带 --minimized，且旧版无 --minimized 注册表项会自动修复补齐
+        cmd_auto = preferences.autostart_command()
+        self.assertIn('--minimized', cmd_auto)
+        exe_only = r'"C:\Users\demo\AppData\Local\Programs\Blanket\Blanket.exe" --minimized'
+        self.assertEqual(
+            preferences._command_parts(exe_only),
+            (os.path.normcase(r'C:\Users\demo\AppData\Local\Programs\Blanket\Blanket.exe'), ''),
+        )
+        old_no_min = cmd_auto.replace(' --minimized', '')
+        reg_store = {(preferences.RUN_KEY, 'Blanket'): old_no_min}
+        written = {}
+
+        class _RegKey:
+            def __init__(self, sub): self.sub = sub
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        with mock.patch.object(preferences.winreg, 'OpenKey', side_effect=lambda _r, s, *_a: _RegKey(s)), \
+             mock.patch.object(preferences.winreg, 'QueryValueEx',
+                               side_effect=lambda k, n: (reg_store[(k.sub, n)], 1) if (k.sub, n) in reg_store else (_ for _ in ()).throw(FileNotFoundError(n))), \
+             mock.patch.object(preferences.winreg, 'SetValueEx', side_effect=lambda k, n, _r, _t, v: written.__setitem__((k.sub, n), v)):
+            self.assertFalse(preferences.autostart_enabled())
+            self.assertTrue(preferences.repair_autostart())
+            self.assertIn('--minimized', written[(preferences.RUN_KEY, 'Blanket')])
+
+        # 2. 多格式文件剪贴板（CF_HDROP + Preferred DropEffect + FileNameW）与路径纯文本复制
+        with tempfile.TemporaryDirectory() as tmp:
+            cn_sub = Path(tmp) / '中文 AI 测试目录'
+            cn_sub.mkdir()
+            f_comma = cn_sub / '2026,Q1汇报,终版.pdf'
+            f_comma.write_bytes(b'%PDF-1.4')
+
+            hdrop_b, extras = qh.build_file_clipboard_payloads(f_comma)
+            extra_map = dict(extras)
+            self.assertIn('Preferred DropEffect', extra_map)
+            self.assertEqual(int.from_bytes(extra_map['Preferred DropEffect'], 'little'), 1)
+            self.assertIn('FileNameW', extra_map)
+            self.assertEqual(
+                extra_map['FileNameW'][:-2].decode('utf-16-le'),
+                str(f_comma.resolve()),
+            )
+
+            # 模拟剪贴板同时注册并写入多格式；扩展格式写入失败时释放自身句柄且主格式仍返回成功
+            set_calls = []
+            freed_ext = []
+            bufs = [ctypes.create_string_buffer(512) for _ in range(6)]
+            addrs = [ctypes.addressof(b) for b in bufs]
+            alloc_iter = iter(addrs)
+
+            def fake_set_clip(fmt_id, handle):
+                set_calls.append((fmt_id, handle))
+                return handle if fmt_id != 9002 else 0  # 模拟第 2 个扩展格式失败
+
+            fmt_ids = {'Preferred DropEffect': 9001, 'FileNameW': 9002, 'FileName': 9003}
+            with mock.patch.object(qh.kernel32, 'GlobalAlloc', side_effect=lambda _f, _s: next(alloc_iter)), \
+                 mock.patch.object(qh.kernel32, 'GlobalLock', side_effect=lambda h: h), \
+                 mock.patch.object(qh.kernel32, 'GlobalUnlock', return_value=1), \
+                 mock.patch.object(qh.kernel32, 'GlobalFree', side_effect=lambda h: freed_ext.append(h) or 0), \
+                 mock.patch.object(qh.user32, 'OpenClipboard', return_value=1), \
+                 mock.patch.object(qh.user32, 'EmptyClipboard', return_value=1), \
+                 mock.patch.object(qh.user32, 'CloseClipboard', return_value=1), \
+                 mock.patch.object(qh.user32, 'RegisterClipboardFormatW', side_effect=lambda n: fmt_ids.get(n, 0)), \
+                 mock.patch.object(qh.user32, 'SetClipboardData', side_effect=fake_set_clip):
+                self.assertTrue(qh.copy_file_to_clipboard(f_comma))
+                written_fmts = [f for f, _ in set_calls]
+                self.assertIn(qh.CF_HDROP, written_fmts)
+                self.assertIn(9001, written_fmts)
+                self.assertIn(9002, written_fmts)
+                self.assertEqual(len(freed_ext), 1)  # 仅失败的 9002 句柄被释放
+
+                # 复制完整路径纯文本（CF_UNICODETEXT）
+                set_calls.clear()
+                self.assertTrue(qh.copy_path_to_clipboard(f_comma))
+                self.assertEqual(set_calls[-1][0], qh.CF_UNICODETEXT)
+
+            self.assertFalse(qh.copy_path_to_clipboard(cn_sub / '不存在.pdf'))
+
+            # 含英文逗号文件名定位：优先走 SHOpenFolderAndSelectItems 且释放 PIDL
+            freed_pidls = []
+            with mock.patch.object(qh.ole32, 'CoInitializeEx', return_value=0), \
+                 mock.patch.object(qh.ole32, 'CoUninitialize'), \
+                 mock.patch.object(qh.shell32, 'ILCreateFromPathW', return_value=777), \
+                 mock.patch.object(qh.shell32, 'SHOpenFolderAndSelectItems', return_value=0) as sel_mock, \
+                 mock.patch.object(qh.shell32, 'ILFree', side_effect=lambda p: freed_pidls.append(p)):
+                self.assertTrue(qh.reveal_in_explorer(f_comma))
+                sel_mock.assert_called_once_with(777, 0, None, 0)
+                self.assertEqual(freed_pidls, [777])
+
+        # 3. DeskKit 20 端口探针：忽略非 DeskKit 的 200 响应，精准命中高序号端口（如 18658）
+        class _FakeResp:
+            def __init__(self, status, body):
+                self.status = status
+                self._body = body
+            def read(self, *_a): return self._body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fake_urlopen(url, timeout=0.1):
+            if ':18642/' in url:
+                return _FakeResp(200, b'<html>not deskkit</html>')
+            if ':18643/' in url:
+                return _FakeResp(200, b'{"ok": false}')
+            if ':18658/' in url:  # 第 17 个端口（超出原 span=6）
+                return _FakeResp(200, b'{"ok": true}')
+            raise OSError('refused')
+
+        with mock.patch.object(qh, 'urlopen', side_effect=fake_urlopen):
+            self.assertEqual(qh._running_deskkit_port(), 18658)
+
+        # 4. 双显示器右边缘主题按钮裁剪：半隐藏在主屏右边缘 (1914) 时宽度裁为 6px，绝不越过 1920 戳入右副屏
+        ix, iy, vw, vh = tb.calc_clipped_button_rect(1914, 100, 48, 1920)
+        self.assertEqual((ix, iy, vw, vh), (1914, 100, 6, 48))
+        self.assertLessEqual(ix + vw, 1920)
+        ix2, iy2, vw2, vh2 = tb.calc_clipped_button_rect(1866, 100, 48, 1920)
+        self.assertEqual((ix2, vw2), (1866, 48))
+
+        # 5. 多屏右边缘番茄钟长句防溢出 & 不误跳入右侧副屏 (1920..3840)
+        dual_bounds = lambda x, y, work=True: (0, 0, 1920, 1040) if x < 1920 else (1920, 0, 3840, 1040)
+        rx, ry = wl.resolve_anchor(None, [1780, 200], 520, 60, bounds_fn=dual_bounds, margin=8)
+        self.assertEqual(rx, 1920 - 520 - 8)
+        self.assertEqual(ry, 200)
+
+        # 6. 国内天气温度高低反向修正（含负温）
+        self.assertEqual(local_weather._format_temp_range('31℃', '20℃'), '20℃–31℃')
+        self.assertEqual(local_weather._format_temp_range('-2℃', '-10℃'), '-10℃–-2℃')
+        self.assertEqual(local_weather._format_temp_range('18℃', '26℃'), '18℃–26℃')
+
+        # 7. Wallpaper Engine 动态壁纸层级辅助判定
+        with mock.patch('desktop_windows.find_desktop_windows', return_value=(1001, 1002)), \
+             mock.patch.object(win32.user32, 'GetAncestor', return_value=1000), \
+             mock.patch.object(win32.user32, 'GetWindow', return_value=2000), \
+             mock.patch.object(win32, 'GetWindowLongPtr', return_value=0):
+            # 存在非置顶普通下层窗口 2000 -> 插在 2000 之后（即桌面 1000 正上方）
+            self.assertEqual(win32._desktop_insert_after(9999), 2000)
+            # 自身已在桌面正上方 -> 返回 None 保持原位
+            self.assertIsNone(win32._desktop_insert_after(2000))
+
+        # 8. 歌词断网异常时不写入永久空缓存，正常无歌词时才缓存空列表
+        dummy_overlay = lw.LyricsOverlay.__new__(lw.LyricsOverlay)
+        dummy_overlay._cache = {}
+        dummy_overlay._retry_after = {}
+        dummy_overlay._fetching = set()
+
+        def failing_net(url, *a, **kw):
+            stats = getattr(lw._REQ_STATE, 'stats', None)
+            if isinstance(stats, dict):
+                stats['errors'] = stats.get('errors', 0) + 1
+            raise OSError('offline')
+
+        with mock.patch.object(lw, '_http_json', side_effect=failing_net), \
+             mock.patch.object(lw, 'Thread') as th_mock:
+            th_mock.side_effect = lambda target, **kw: type('T', (), {'start': staticmethod(target)})()
+            dummy_overlay._request_lyrics(('断网歌', '歌手'), '断网歌', '歌手', 200.0, now=10.0)
+            self.assertNotIn(('断网歌', '歌手'), dummy_overlay._cache)
+            self.assertGreater(dummy_overlay._retry_after.get(('断网歌', '歌手'), 0), 10.0)
+
+    def test_real_tk_widgets_scroll_footer_countdown_preview_and_monitor_wheel(self):
+        """在隐藏 Tk 根窗口沙盒中实测：抽屉超高自动滚动且底部三按钮不裁切、番茄钟试看优先级与长句收拢、系统监控 Shift+滚轮。"""
+        import tkinter as tk
+        import countdown_widget as cw
+        import launcher_bar as lb
+        import sys_monitor as sm
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            class _FakeThemeBtn:
+                dark = True
+
+            class _FakeApp:
+                _quitting = False
+                def toggle_theme(self): pass
+                def open_settings(self): pass
+                def discard_mouse(self): pass
+
+            class _FakeWidgets:
+                def __init__(self, r):
+                    self.root = r
+                    self.app = _FakeApp()
+                    self.ui_scale = 1.25
+                    self.theme_button = _FakeThemeBtn()
+                    self.cfg = {}
+                    self.countdown = None
+                def settings(self): pass
+                def save(self): pass
+                def queue_save(self): pass
+                def start_countdown(self, m, l): pass
+                def cancel_countdown(self): pass
+                def current_countdown_text(self, now=None): return ''
+
+            fw = _FakeWidgets(root)
+
+            # 1. 番茄钟：倒计时运行中点“试看一句”不被倒计时挡死，且右边缘长句重排不出右边界
+            with mock.patch.object(cw, 'place_on_desktop') as pod_mock:
+                cd = cw.CountdownWidget(fw, {'position': [1550, 180]}, on_save=lambda: None)
+                fw.countdown = cd
+                cd.start(25, '专注')
+                self.assertIn('25:00', cd.current_text())
+                cd._preview_msg = '这是一句非常长非常长的番茄钟结束试看提示语用来测试屏幕右边界收拢效果'
+                cd._preview_until = time.monotonic() + 5.0
+                self.assertTrue(cd.current_text().startswith('🔔 这是一句'))
+
+                with mock.patch.object(cw, 'bounds', return_value=(0, 0, 1707, 1020)), \
+                     mock.patch('widget_layout.bounds', return_value=(0, 0, 1707, 1020)):
+                    cd.tick(time.monotonic(), blocked=False, on_desktop=True)
+                    placed_x = pod_mock.call_args[0][1]
+                    req_w = cd._last_size[0]
+                    self.assertLessEqual(placed_x + req_w, 1707 - 8)
+
+            # 2. 右侧快捷抽屉：14 号大字 + 9 条便签 + 展开分组在矮屏幕 (520px 高) 下自动启用滚动且吸底栏完整保留
+            bar_cfg = {
+                'bar_style': {'font_size': 14},
+                'notes': [f'待办便签测试条目第 {i} 条' for i in range(9)],
+                'groups': {'常用工具': ['C:\\Windows\\notepad.exe'] * 5},
+            }
+            bar = lb.LauncherBar(fw, bar_cfg)
+            bar.groups_section_open = True
+            bar.expanded.add('常用工具')
+            bar.render()
+            with mock.patch.object(lb, 'bounds', return_value=(0, 0, 1920, 520)):
+                bar._reposition(1910, 260)
+                self.assertTrue(bar._scrollable)
+                self.assertGreater(bar.foot.winfo_reqheight(), 20)
+                # recolor 不应销毁重建控件
+                old_body = bar.body
+                bar.recolor('#123456')
+                self.assertIs(bar.body, old_body)
+            bar.close()
+
+            # 3. 系统监控：裸滚轮不误改透明度，Shift+滚轮改透明度，Ctrl+滚轮改字号
+            mon = sm.SystemMonitor(fw, lambda x, y, work=True: (0, 0, 1920, 1040))
+            orig_alpha = mon.cfg['alpha']
+            orig_size = mon.cfg['size']
+            Evt = lambda st, d: type('E', (), {'state': st, 'delta': d})()
+            mon.wheel(Evt(0, 120))          # 裸滚轮：忽略
+            self.assertEqual(mon.cfg['alpha'], orig_alpha)
+            self.assertEqual(mon.cfg['size'], orig_size)
+            mon.wheel(Evt(1, -120))         # Shift + 向下滚：透明度 -5
+            self.assertEqual(mon.cfg['alpha'], orig_alpha - 5)
+            mon.wheel(Evt(4, 120))          # Ctrl + 向上滚：字号 +1
+            self.assertEqual(mon.cfg['size'], orig_size + 1)
+            mon.cancel_save()
+        finally:
+            root.destroy()
+
 
 if __name__ == '__main__':
     unittest.main()

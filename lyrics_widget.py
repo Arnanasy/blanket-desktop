@@ -3,7 +3,8 @@ import bisect
 import json
 import logging
 import re
-from threading import Thread
+from threading import Thread, local
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 from urllib.parse import urlencode
@@ -71,13 +72,26 @@ def current_lyric_lines(lines, pos_sec):
     return cur, nxt
 
 
+_REQ_STATE = local()
+RETRY_COOLDOWN_SECONDS = 15.0
+
+
 def _http_json(url, timeout=5.0, headers=None):
     hdrs = {'User-Agent': 'Blanket/1.0 (Desktop Lyrics)'}
     if headers:
         hdrs.update(headers)
     req = Request(url, headers=hdrs)
-    with urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read(250000).decode('utf-8', 'replace'))
+    stats = getattr(_REQ_STATE, 'stats', None)
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read(250000).decode('utf-8', 'replace'))
+            if isinstance(stats, dict):
+                stats['ok'] = stats.get('ok', 0) + 1
+            return data
+    except Exception:
+        if isinstance(stats, dict):
+            stats['errors'] = stats.get('errors', 0) + 1
+        raise
 
 
 def _fetch_netease_lyrics(title, artist, duration=0.0):
@@ -185,6 +199,7 @@ class LyricsOverlay:
         self.anchor = cfg.get('lyrics_anchor') if isinstance(cfg.get('lyrics_anchor'), dict) else None
 
         self._cache = {}           # (title, artist) -> [(sec, text), ...]
+        self._retry_after = {}     # 网络异常时暂不写永久空缓存，记录下次允许重试的 monotonic 时刻
         self._fetching = set()
         self._active_key = None
         self._lines = []
@@ -224,17 +239,33 @@ class LyricsOverlay:
             'lyrics_anchor': self.anchor,
         }
 
-    def _request_lyrics(self, key, title, artist, duration):
+    def _request_lyrics(self, key, title, artist, duration, now=None):
         if key in self._cache or key in self._fetching:
+            return
+        now_t = time.monotonic() if now is None else now
+        if now_t < self._retry_after.get(key, 0.0):
             return
         self._fetching.add(key)
 
         def job():
+            _REQ_STATE.stats = {'ok': 0, 'errors': 0}
+            had_exception = False
             try:
                 lines = fetch_synced_lyrics(title, artist, duration)
             except Exception:
                 lines = []
-            self._cache[key] = lines
+                had_exception = True
+            stats = getattr(_REQ_STATE, 'stats', {})
+            net_failed = had_exception or (not lines and stats.get('errors', 0) > 0 and stats.get('ok', 0) == 0)
+            if lines:
+                self._cache[key] = lines
+                self._retry_after.pop(key, None)
+            elif net_failed:
+                # 断网或请求全部超时：不写入永久空缓存，冷却后允许连网自动重试
+                self._retry_after[key] = time.monotonic() + RETRY_COOLDOWN_SECONDS
+            else:
+                self._cache[key] = []
+                self._retry_after.pop(key, None)
             self._fetching.discard(key)
 
         Thread(target=job, name='lyrics', daemon=True).start()
@@ -366,6 +397,7 @@ class LyricsOverlay:
             return
 
         key = state['key']
+        now_t = time.monotonic()
         if key != self._active_key:
             self._active_key = key
             self._last_drawn = None
@@ -373,9 +405,12 @@ class LyricsOverlay:
                 self._lines = self._cache[key]
             else:
                 self._lines = []
-                self._request_lyrics(key, state['title'], state['artist'], state.get('duration', 0.0))
-        elif not self._lines and key in self._cache:
-            self._lines = self._cache[key]
+                self._request_lyrics(key, state['title'], state['artist'], state.get('duration', 0.0), now=now_t)
+        elif not self._lines:
+            if key in self._cache:
+                self._lines = self._cache[key]
+            else:
+                self._request_lyrics(key, state['title'], state['artist'], state.get('duration', 0.0), now=now_t)
 
         if not self._lines:
             if self.win.winfo_viewable():

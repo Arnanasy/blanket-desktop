@@ -148,16 +148,24 @@ class _SmtcWorker:
         self._version = 0
         self._last_thumb_key = None
         self._last_thumb = None
+        self._thumb_attempts = 0
         self._thread = None
 
     def start(self):
-        if not HAS_WINRT or self._thread is not None:
+        if not HAS_WINRT or (self._thread is not None and self._thread.is_alive()):
             return
-        self._thread = Thread(target=self._run, name='smtc', daemon=True)
+        stop_ev = Event()
+        self._stop = stop_ev
+        self._thread = Thread(target=self._run, args=(stop_ev,), name='smtc', daemon=True)
         self._thread.start()
 
     def stop(self):
         self._stop.set()
+        self._thread = None
+        self._state = _empty_state()
+        self._last_thumb_key = None
+        self._last_thumb = None
+        self._thumb_attempts = 0
 
     def send(self, action, arg=None):
         if HAS_WINRT:
@@ -179,11 +187,13 @@ class _SmtcWorker:
         dur = st.get('duration', 0.0)
         return min(dur, pos) if dur > 0 else pos
 
-    def _run(self):
+    def _run(self, stop_ev=None):
+        if stop_ev is None:
+            stop_ev = self._stop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._loop())
+            loop.run_until_complete(self._loop(stop_ev))
         except Exception:
             log.debug('SMTC 轮询线程退出', exc_info=True)
         finally:
@@ -251,12 +261,20 @@ class _SmtcWorker:
             return
         key = (title, artist)
         if key != self._last_thumb_key:
-            self._last_thumb = await self._read_thumb(info.thumbnail if info else None)
             self._last_thumb_key = key
+            self._last_thumb = None
+            self._thumb_attempts = 0
+        # 切歌首秒若播放器尚未推送封面流，前 5 轮轮询内自动补读封面，避免整首歌缺失封面
+        if self._last_thumb is None and self._thumb_attempts < 5:
+            self._thumb_attempts += 1
+            self._last_thumb = await self._read_thumb(info.thumbnail if info else None)
 
         pos_base, pos_at, duration = self._read_timeline(session, playing)
+        thumb_len = len(self._last_thumb) if self._last_thumb else 0
+        prev_thumb_len = len(self._state['thumb']) if self._state.get('thumb') else 0
+        dur_changed = abs((self._state.get('duration') or 0.0) - duration) >= 0.5
         changed = (not self._state['active'] or self._state['playing'] != playing
-                   or self._state['key'] != key)
+                   or self._state['key'] != key or thumb_len != prev_thumb_len or dur_changed)
         self._state = {
             'active': True, 'playing': playing, 'title': title, 'artist': artist,
             'thumb': self._last_thumb, 'key': key,
@@ -292,16 +310,18 @@ class _SmtcWorker:
             except Exception:
                 log.debug('SMTC 控制指令失败: %s', action, exc_info=True)
 
-    async def _loop(self):
+    async def _loop(self, stop_ev=None):
+        if stop_ev is None:
+            stop_ev = self._stop
         mgr = await _SmtcManager.request_async()
-        while not self._stop.is_set():
+        while not stop_ev.is_set():
             try:
                 await self._drain_cmds(mgr)
                 await self._poll_once(mgr)
             except Exception:
                 log.debug('SMTC 单次轮询失败', exc_info=True)
             for _ in range(int(POLL_INTERVAL / 0.15)):
-                if self._stop.is_set() or not self._cmds.empty():
+                if stop_ev.is_set() or not self._cmds.empty():
                     break
                 await asyncio.sleep(0.15)
 
@@ -453,7 +473,8 @@ class MediaWidget:
     def _ensure_cover(self):
         size = self._cover_size()
         rad = 4 if self.prefs['style'] == '方形卡片' else max(6, round(size * 0.13))
-        cache_key = (self._state['key'], size, rad)
+        thumb_len = len(self._state['thumb']) if self._state.get('thumb') else 0
+        cache_key = (self._state['key'], thumb_len, size, rad)
         if cache_key != self._cover_cache_key:
             self._cover_cache_key = cache_key
             self._cover_photo = make_rounded_cover(self._state['thumb'], size, radius=rad)
@@ -660,7 +681,10 @@ class MediaWidget:
                     self._start_anim(0.0)
         audio_assist = bool(self.prefs.get('audio_assist', True))
         if not self.enabled.get() or (not HAS_WINRT and not audio_assist):
+            self.worker.stop()
             self.audio_monitor.stop()
+            self._state = _empty_state()
+            self._last_state_sig = None
             if self.win.winfo_viewable():
                 self.win.withdraw()
             if self.lyrics.win.winfo_viewable():
@@ -674,7 +698,9 @@ class MediaWidget:
         prev_fallback = bool(self._state.get('audio_fallback'))
         st = merge_media_and_audio_state(smtc_st, audio_active, audio_assist=audio_assist, prev_fallback=prev_fallback)
 
-        sig = (st['active'], st['playing'], st['key'], st['title'], st['artist'])
+        thumb_len = len(st['thumb']) if st.get('thumb') else 0
+        dur_tag = round(st.get('duration') or 0.0, 1)
+        sig = (st['active'], st['playing'], st['key'], st['title'], st['artist'], thumb_len, dur_tag)
         self._state = st
         if sig != self._last_state_sig:
             self._last_state_sig = sig

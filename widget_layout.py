@@ -6,11 +6,13 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def clamp_to_work_area(x, y, width, height, bounds_fn=bounds, margin=0):
-    """将窗口坐标约束在中心点所在显示器的工作区内，避免分辨率切换或拔屏后跑出屏幕。"""
+def clamp_to_work_area(x, y, width, height, bounds_fn=None, margin=0, probe_pt=None):
+    """将窗口坐标约束在所在显示器的工作区内，避免分辨率切换、宽度暴涨或拔屏后跑出屏幕。"""
+    bounds_fn = bounds_fn or bounds
     w = max(1, int(width))
     h = max(1, int(height))
-    l, t, r, b = bounds_fn(int(x) + w // 2, int(y) + h // 2, work=True)
+    px, py = probe_pt if probe_pt is not None else (int(x) + w // 2, int(y) + h // 2)
+    l, t, r, b = bounds_fn(int(px), int(py), work=True)
     lo_x = l + margin
     hi_x = max(lo_x, r - w - margin)
     lo_y = t + margin
@@ -18,8 +20,9 @@ def clamp_to_work_area(x, y, width, height, bounds_fn=bounds, margin=0):
     return max(lo_x, min(int(x), hi_x)), max(lo_y, min(int(y), hi_y))
 
 
-def capture_anchor(x, y, width, height, bounds_fn=bounds):
+def capture_anchor(x, y, width, height, bounds_fn=None):
     """将窗口当前绝对像素位置转换为所在显示器的相对锚点，便于跨分辨率自适应。"""
+    bounds_fn = bounds_fn or bounds
     w = max(1, int(width))
     h = max(1, int(height))
     l, t, r, b = bounds_fn(int(x) + w // 2, int(y) + h // 2, work=True)
@@ -34,8 +37,9 @@ def capture_anchor(x, y, width, height, bounds_fn=bounds):
     }
 
 
-def resolve_anchor(anchor, fallback_pos, width, height, bounds_fn=bounds, margin=0):
+def resolve_anchor(anchor, fallback_pos, width, height, bounds_fn=None, margin=0):
     """优先按相对锚点还原坐标（分辨率变化时自动按比例适配），兼容旧版纯像素配置。"""
+    bounds_fn = bounds_fn or bounds
     w = max(1, int(width))
     h = max(1, int(height))
     fx, fy = int(fallback_pos[0]), int(fallback_pos[1])
@@ -54,8 +58,9 @@ def resolve_anchor(anchor, fallback_pos, width, height, bounds_fn=bounds, margin
         span_y = max(0, (b - t) - h - margin * 2)
         x = l + margin + round(rx * span_x)
         y = t + margin + round(ry * span_y)
-        return clamp_to_work_area(x, y, w, h, bounds_fn=bounds_fn, margin=margin)
-    return clamp_to_work_area(fx, fy, w, h, bounds_fn=bounds_fn, margin=margin)
+        return clamp_to_work_area(x, y, w, h, bounds_fn=bounds_fn, margin=margin, probe_pt=(probe_x, probe_y))
+    return clamp_to_work_area(fx, fy, w, h, bounds_fn=bounds_fn, margin=margin,
+                              probe_pt=(fx + min(w, 120) // 2, fy + min(h, 60) // 2))
 
 
 class AnchorRegistry:

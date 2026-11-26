@@ -37,8 +37,8 @@ def _pythonw_path():
 
 def autostart_command():
     if getattr(sys, 'frozen', False):
-        return '"{}"'.format(os.path.abspath(sys.executable))
-    return '"{}" "{}"'.format(_pythonw_path(), os.path.join(APP_DIR, 'launch.pyw'))
+        return '"{}" --minimized'.format(os.path.abspath(sys.executable))
+    return '"{}" "{}" --minimized'.format(_pythonw_path(), os.path.join(APP_DIR, 'launch.pyw'))
 
 
 def _registered_command(value_name=RUN_VALUE):
@@ -57,23 +57,32 @@ def _delete_reg_value(subkey, value_name):
         pass
 
 
-def _command_parts(command):
-    """从注册表命令行里取出规范化后的 (解释器/exe路径, 脚本路径)（兼容打包 exe 与源码脚本）。"""
+def _split_cmd_tokens(command):
     import shlex
     try:
-        parts = shlex.split(command, posix=False)
+        parts = shlex.split(command or '', posix=False)
     except ValueError:
-        parts = command.split()
-    cleaned = [p.strip('"') for p in parts if p.strip('"')]
-    if not cleaned:
+        parts = (command or '').split()
+    return [p.strip('"') for p in parts if p.strip('"')]
+
+
+def _has_minimized_flag(command):
+    tokens = {t.lower() for t in _split_cmd_tokens(command) if t.startswith('-')}
+    return '--minimized' in tokens or '-m' in tokens
+
+
+def _command_parts(command):
+    """从注册表命令行里取出规范化后的 (解释器/exe路径, 脚本路径)（忽略 --minimized 等参数标志）。"""
+    pos_args = [p for p in _split_cmd_tokens(command) if not p.startswith('-')]
+    if not pos_args:
         return '', ''
-    if len(cleaned) == 1:
-        if cleaned[0].lower().endswith('.exe'):
-            return os.path.normcase(os.path.abspath(cleaned[0])), ''
+    if len(pos_args) == 1:
+        if pos_args[0].lower().endswith('.exe'):
+            return os.path.normcase(os.path.abspath(pos_args[0])), ''
         return '', ''
     return (
-        os.path.normcase(os.path.abspath(cleaned[0])),
-        os.path.normcase(os.path.abspath(cleaned[-1])),
+        os.path.normcase(os.path.abspath(pos_args[0])),
+        os.path.normcase(os.path.abspath(pos_args[-1])),
     )
 
 
@@ -101,17 +110,18 @@ def _approve_startup(value_name=RUN_VALUE):
 
 
 def autostart_enabled():
-    """开机自启是否已开启、未被系统禁用，并且指向当前解释器与这份程序。"""
+    """开机自启是否已开启、未被系统禁用，并且指向当前解释器与这份程序（含静默标志）。"""
     for name in (RUN_VALUE, LEGACY_RUN_VALUE):
         command = _registered_command(name)
         if command is not None:
             return (_command_parts(command) == _command_parts(autostart_command())
+                    and _has_minimized_flag(command)
                     and _startup_approved(name))
     return False
 
 
 def repair_autostart():
-    """修正移动后的自启路径，并将旧版 JingZhuoMian 注册表键无缝迁移为 Blanket。"""
+    """修正移动后的自启路径、补齐 --minimized 静默参数，并将旧版 JingZhuoMian 注册表键无缝迁移为 Blanket。"""
     cur_cmd = _registered_command(RUN_VALUE)
     legacy_cmd = _registered_command(LEGACY_RUN_VALUE)
     if cur_cmd is None and legacy_cmd is None:
@@ -122,7 +132,9 @@ def repair_autostart():
     active_cmd = cur_cmd if cur_cmd is not None else legacy_cmd
     target_cmd = autostart_command()
 
-    if not need_migrate and _command_parts(active_cmd) == _command_parts(target_cmd):
+    if (not need_migrate
+            and _command_parts(active_cmd) == _command_parts(target_cmd)
+            and _has_minimized_flag(active_cmd)):
         return False
 
     approved = _startup_approved(active_name)

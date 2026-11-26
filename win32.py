@@ -36,6 +36,7 @@ GWL_STYLE = -16
 GWL_EXSTYLE = -20
 GWLP_WNDPROC = -4
 WS_CAPTION = 0x00C00000              # 标题栏（用于区分普通最大化窗口与真正全屏）
+WS_EX_TOPMOST = 0x00000008           # 置顶窗口扩展样式
 WS_EX_TRANSPARENT = 0x00000020       # 鼠标点击穿透（直达下层游戏或桌面）
 WS_EX_TOOLWINDOW = 0x00000080        # 不在任务栏 / Alt+Tab 中出现
 WS_EX_LAYERED = 0x00080000           # 分层窗口（配合穿透与透明色键）
@@ -45,6 +46,7 @@ HWND_TOP = 0
 HWND_TOPMOST = -1
 HWND_NOTOPMOST = -2
 HWND_BOTTOM = 1
+GW_HWNDPREV = 3
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
@@ -71,6 +73,9 @@ MOD_NOREPEAT = 0x4000
 
 # 消息
 WM_NULL = 0x0000
+WM_CLOSE = 0x0010
+WM_QUERYENDSESSION = 0x0011
+WM_ENDSESSION = 0x0016
 WM_SETTINGCHANGE = 0x001A
 WM_DISPLAYCHANGE = 0x007E
 WM_SYSCOMMAND = 0x0112
@@ -90,7 +95,9 @@ SMTO_ABORTIFHUNG = 0x0002
 ES_SYSTEM_REQUIRED = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 ES_CONTINUOUS = 0x80000000
+CF_UNICODETEXT = 13
 CF_HDROP = 15
+DROPEFFECT_COPY = 1
 GMEM_MOVEABLE = 0x0002
 
 # 系统度量
@@ -249,6 +256,7 @@ _sig(user32.GetLastInputInfo, BOOL, ctypes.POINTER(LASTINPUTINFO))
 _sig(user32.WindowFromPoint, HWND, POINT)
 _sig(user32.GetClassNameW, INT, HWND, wintypes.LPWSTR, INT)
 _sig(user32.GetAncestor, HWND, HWND, UINT)
+_sig(user32.GetWindow, HWND, HWND, UINT)
 _sig(user32.GetForegroundWindow, HWND)
 _sig(user32.GetWindowThreadProcessId, DWORD, HWND, ctypes.POINTER(DWORD))
 _sig(user32.SetForegroundWindow, BOOL, HWND)
@@ -277,6 +285,7 @@ _sig(user32.OpenClipboard, BOOL, HWND)
 _sig(user32.EmptyClipboard, BOOL)
 _sig(user32.SetClipboardData, H, UINT, H)
 _sig(user32.CloseClipboard, BOOL)
+_sig(user32.RegisterClipboardFormatW, UINT, wintypes.LPCWSTR)
 
 try:
     GetWindowLongPtr = _sig(user32.GetWindowLongPtrW, LONG_PTR, HWND, INT)
@@ -318,6 +327,9 @@ _sig(gdi32.DeleteDC, BOOL, wintypes.HDC)
 
 # ---------------------------------------------------------------- 其他
 _sig(shell32.Shell_NotifyIconW, BOOL, DWORD, ctypes.POINTER(NOTIFYICONDATAW))
+_sig(shell32.ILCreateFromPathW, ctypes.c_void_p, wintypes.LPCWSTR)
+_sig(shell32.ILFree, None, ctypes.c_void_p)
+_sig(shell32.SHOpenFolderAndSelectItems, HRESULT, ctypes.c_void_p, UINT, ctypes.c_void_p, DWORD)
 _sig(wtsapi32.WTSRegisterSessionNotification, BOOL, HWND, DWORD)
 _sig(wtsapi32.WTSUnRegisterSessionNotification, BOOL, HWND)
 _sig(ole32.CoInitializeEx, HRESULT, wintypes.LPVOID, DWORD)
@@ -392,8 +404,30 @@ def cursor_pos():
     return p
 
 
+def _desktop_insert_after(hwnd):
+    """在非桌面激活态下，优先将挂件垫在最底层普通窗口之下、桌面/Wallpaper Engine 之上。"""
+    try:
+        from desktop_windows import find_desktop_windows
+        shell, _lv = find_desktop_windows()
+    except Exception:
+        shell = None
+    if not shell:
+        return HWND_BOTTOM
+    desk_root = user32.GetAncestor(shell, GA_ROOT) or shell
+    if not desk_root:
+        return HWND_BOTTOM
+    prev = user32.GetWindow(desk_root, GW_HWNDPREV)
+    if not prev:
+        return HWND_BOTTOM
+    if prev == hwnd:
+        return None
+    if GetWindowLongPtr(prev, GWL_EXSTYLE) & WS_EX_TOPMOST:
+        return HWND_BOTTOM
+    return prev
+
+
 def place_on_desktop(hwnd, x=None, y=None, on_desktop=False, show=False):
-    """把桌面挂件稳稳放在壁纸之上、普通软件之下；切回桌面或 Win+D 后自动恢复可见。"""
+    """把桌面挂件稳稳放在壁纸（含 Wallpaper Engine 动态壁纸）之上、普通软件之下；切回桌面或 Win+D 后自动恢复可见。"""
     if not hwnd:
         return
     if user32.IsIconic(hwnd) or show:
@@ -404,5 +438,11 @@ def place_on_desktop(hwnd, x=None, y=None, on_desktop=False, show=False):
         x, y = 0, 0
     if show:
         flags |= SWP_SHOWWINDOW
-    z = HWND_TOP if on_desktop else HWND_BOTTOM
+    if on_desktop:
+        z = HWND_TOP
+    else:
+        z = _desktop_insert_after(hwnd)
+        if z is None:
+            flags |= SWP_NOZORDER
+            z = HWND_BOTTOM
     user32.SetWindowPos(hwnd, z, int(x), int(y), 0, 0, flags)

@@ -4,13 +4,13 @@ from pathlib import Path
 import queue
 
 from win32 import (user32, gdi32, shell32, NOTIFYICONDATAW, ICONINFO, WNDPROC, SetWindowLongPtr,
-                   GWLP_WNDPROC, WM_NULL, WM_APP, WM_LBUTTONUP, WM_RBUTTONUP, WM_DISPLAYCHANGE,
-                   WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WM_HOTKEY, PBT_APMRESUMESUSPEND,
-                   PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK, NIM_ADD, NIM_MODIFY, NIM_DELETE,
-                   NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO, NIIF_INFO, TPM_RIGHTBUTTON,
-                   TPM_NONOTIFY, TPM_RETURNCMD, MF_STRING, MF_CHECKED, MF_SEPARATOR, IMAGE_ICON,
-                   LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON, SM_CYSMICON, MOD_ALT, MOD_CONTROL,
-                   MOD_NOREPEAT, VK_H, VK_T, cursor_pos)
+                   GWLP_WNDPROC, WM_NULL, WM_QUERYENDSESSION, WM_ENDSESSION, WM_APP, WM_LBUTTONUP,
+                   WM_RBUTTONUP, WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE,
+                   WM_HOTKEY, PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK,
+                   NIM_ADD, NIM_MODIFY, NIM_DELETE, NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO,
+                   NIIF_INFO, TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, MF_STRING, MF_CHECKED,
+                   MF_SEPARATOR, IMAGE_ICON, LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON, SM_CYSMICON,
+                   MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_H, VK_T, cursor_pos)
 
 WM_TRAY = WM_APP + 1
 IDM_OPEN = 2001
@@ -178,8 +178,22 @@ class TrayIcon:
                 self.on_hotkey_icons()
             elif event == 'hotkey_theme' and self.on_hotkey_theme:
                 self.on_hotkey_theme()
+            elif event == 'quit':
+                self._on_quit()
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
+        # 响应系统关机/注销及安装包重启管理器（Restart Manager）优雅退出，提前恢复桌面图标防误藏
+        if msg == WM_QUERYENDSESSION:
+            return 1
+        if msg == WM_ENDSESSION:
+            if wparam:
+                try:
+                    from desktop_windows import set_icons_visible
+                    set_icons_visible(True)
+                except Exception:
+                    pass
+                self._events.put('quit')
+            return 0
         if msg == WM_HOTKEY:
             if wparam == HOTKEY_ICONS:
                 self._events.put('hotkey_icons')

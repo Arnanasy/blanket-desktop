@@ -138,10 +138,11 @@ class AudioActivityMonitor:
         self._last_sound_at = 0.0
 
     def start(self):
-        if self._thread is not None:
+        if self._thread is not None and self._thread.is_alive():
             return
-        self._stop.clear()
-        self._thread = Thread(target=self._run, name='audio-monitor', daemon=True)
+        stop_ev = Event()
+        self._stop = stop_ev
+        self._thread = Thread(target=self._run, args=(stop_ev,), name='audio-monitor', daemon=True)
         self._thread.start()
 
     def stop(self):
@@ -159,7 +160,9 @@ class AudioActivityMonitor:
         t = time.monotonic() if now is None else now
         return (t - self._last_sound_at) <= self.silence_grace
 
-    def _run(self):
+    def _run(self, stop_ev=None):
+        if stop_ev is None:
+            stop_ev = self._stop
         try:
             ole32 = _make_ole32()
         except OSError:
@@ -187,7 +190,7 @@ class AudioActivityMonitor:
                 return
             get_default_fn = _GET_DEFAULT_FN(_vtable(enum_ptr)[4])
             peak_val = ctypes.c_float()
-            while not self._stop.is_set():
+            while not stop_ev.is_set():
                 try:
                     if get_peak_fn is None:
                         hr_dev = get_default_fn(enum_ptr, E_RENDER, E_MULTIMEDIA, ctypes.byref(dev_ptr))
@@ -215,7 +218,7 @@ class AudioActivityMonitor:
                 except Exception:
                     log.debug('音频峰值采样失败', exc_info=True)
                     reset_meter()
-                self._stop.wait(self.poll_seconds)
+                stop_ev.wait(self.poll_seconds)
         finally:
             reset_meter()
             _release(enum_ptr)

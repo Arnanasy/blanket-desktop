@@ -19,6 +19,14 @@ CLICK_SLOP = 6             # 按下到松开位移不超过此值视为点击
 DRAG_START = 5             # 纵向位移超过此值开始拖动
 
 
+def calc_clipped_button_rect(cur_x, cur_y, size, mon_right):
+    """计算贴边悬浮按钮在当前显示器内的裁剪矩形 (x, y, visible_w, h)，确保多屏接缝处零像素溢出到右侧副屏。"""
+    ix = round(cur_x)
+    iy = round(cur_y)
+    vis_w = max(1, min(int(size), int(mon_right) - ix))
+    return ix, iy, vis_w, int(size)
+
+
 class ThemeButton:
     def __init__(self, root, cfg, ui_scale, on_toggle, on_settings, on_save):
         self.root = root
@@ -51,7 +59,8 @@ class ThemeButton:
         self.images = self._load_images()
         self.label = tk.Label(self.win, bg=KEY_COLOR, fg='#F59E0B', borderwidth=0, highlightthickness=0,
                               font=('Segoe UI Symbol', max(12, self.size // 2)))
-        self.label.pack(fill='both', expand=True)
+        # 锚定在左边缘固定尺寸，缩回右边缘裁窄窗口宽度时实现平滑藏入边缘且不溢出到右副屏
+        self.label.place(x=0, y=0, width=self.size, height=self.size)
         self.win.bind('<Enter>', self._on_enter)
         self.win.bind('<ButtonPress-1>', self._on_press)
         self.win.bind('<B1-Motion>', self._on_motion)
@@ -99,13 +108,14 @@ class ThemeButton:
             user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     # ------------------------------------------------------------ 位置与动画
-    def _move(self, extra=0):
-        user32.SetWindowPos(self.hwnd, HWND_TOPMOST, round(self.cur_x), round(self.cur_y),
-                            self.size, self.size, SWP_NOSIZE | SWP_NOACTIVATE | extra)
-
     def _edges(self):
         l, t, r, b = bounds(int(self.cur_x), int(self.cur_y), work=True)
         return t, r, b, r - PEEK, r - self.size - MARGIN
+
+    def _move(self, extra=0):
+        _t, r, _b, _xh, _xs = self._edges()
+        ix, iy, vis_w, h = calc_clipped_button_rect(self.cur_x, self.cur_y, self.size, r)
+        user32.SetWindowPos(self.hwnd, HWND_TOPMOST, ix, iy, vis_w, h, SWP_NOACTIVATE | extra)
 
     def place(self):
         t, r, b, x_hidden, x_shown = self._edges()

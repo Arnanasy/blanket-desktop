@@ -1,9 +1,11 @@
 """右侧快捷中枢核心能力：最新文件自动速取、一键复制文件到剪贴板、随手便签清洗、倒计时格式化、屏幕常亮/息屏与本地工具箱联动。"""
 import ctypes
 from ctypes import wintypes
+import json
 import math
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import time
@@ -11,9 +13,10 @@ from urllib.request import urlopen
 import webbrowser
 import winreg
 
-from win32 import (user32, kernel32, HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER,
+from win32 import (user32, kernel32, shell32, ole32, HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER,
                    ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED,
-                   CF_HDROP, GMEM_MOVEABLE)
+                   CF_UNICODETEXT, CF_HDROP, DROPEFFECT_COPY, GMEM_MOVEABLE,
+                   COINIT_APARTMENTTHREADED, S_OK, S_FALSE, RPC_E_CHANGED_MODE)
 
 _SHELL_FOLDERS_KEY = r'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
 _DOWNLOADS_GUID = '{374DE290-123F-4565-9164-39C4925E467B}'
@@ -122,13 +125,26 @@ def scan_recent_files(limit=5, dir_pairs=None):
 
 
 def reveal_in_explorer(path_str):
-    """在资源管理器中打开并高亮选中目标文件。"""
+    """在资源管理器中打开并高亮选中目标文件（使用 Shell PIDL 原生接口，兼容含英文逗号等特殊字符的文件名）。"""
     p = Path(path_str)
-    if p.exists():
-        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-        subprocess.Popen(['explorer.exe', f'/select,{p}'], creationflags=creationflags)
-        return True
-    return False
+    if not p.exists():
+        return False
+    resolved = str(p.resolve())
+    hr_init = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+    try:
+        pidl = shell32.ILCreateFromPathW(resolved)
+        if pidl:
+            try:
+                if shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0) == S_OK:
+                    return True
+            finally:
+                shell32.ILFree(pidl)
+    finally:
+        if hr_init in (S_OK, S_FALSE):
+            ole32.CoUninitialize()
+    creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    subprocess.Popen(f'explorer.exe /select,"{resolved}"', creationflags=creationflags)
+    return True
 
 
 class _DROPFILES(ctypes.Structure):
@@ -141,7 +157,7 @@ class _DROPFILES(ctypes.Structure):
 
 
 def build_cf_hdrop_bytes(path_str):
-    """构造 Windows 标准 CF_HDROP 剪贴板内存载荷（UTF-16LE 双空结尾），支持微信/QQ/资源管理器直接 Ctrl+V 粘贴文件。"""
+    """构造 Windows 标准 CF_HDROP 剪贴板内存载荷（UTF-16LE 双空结尾）。"""
     resolved = str(Path(path_str).resolve())
     header = _DROPFILES()
     header.pFiles = ctypes.sizeof(_DROPFILES)
@@ -151,38 +167,102 @@ def build_cf_hdrop_bytes(path_str):
     return bytes(header) + path_bytes
 
 
-def copy_file_to_clipboard(path_str, owner_hwnd=None):
-    """将本地文件本体（CF_HDROP）写入系统剪贴板，成功返回 True。"""
-    p = Path(path_str)
-    if not p.is_file():
-        return False
-    payload = build_cf_hdrop_bytes(p)
+def build_file_clipboard_payloads(path_str):
+    """构造与 Windows 资源管理器 Ctrl+C 完全对齐的多格式文件剪贴板载荷字典。
+
+    同时提供：
+    - CF_HDROP：供微信/QQ/飞书、Chrome/Edge/Firefox 网页 paste 事件直接粘贴上传任意文件；
+    - Preferred DropEffect (DROPEFFECT_COPY=1)：供校验复制/剪切意图的目标程序识别；
+    - FileNameW / FileName：供 Cherry Studio、豆包桌面版、Cursor 等基于 Electron 的桌面 AI 软件读取。
+    """
+    resolved = str(Path(path_str).resolve())
+    extra = [
+        ('Preferred DropEffect', struct.pack('<I', DROPEFFECT_COPY)),
+        ('FileNameW', resolved.encode('utf-16-le') + b'\x00\x00'),
+    ]
+    if sys.platform == 'win32':
+        try:
+            ansi = resolved.encode('mbcs')
+            if ansi.decode('mbcs') == resolved:
+                extra.append(('FileName', ansi + b'\x00'))
+        except (UnicodeError, LookupError):
+            pass
+    return build_cf_hdrop_bytes(resolved), extra
+
+
+def _alloc_global_bytes(payload):
+    """分配 GMEM_MOVEABLE 全局内存并拷入字节载荷，失败返回 None。"""
     h_global = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(payload))
     if not h_global:
-        return False
+        return None
     ptr = kernel32.GlobalLock(h_global)
     if not ptr:
         kernel32.GlobalFree(h_global)
-        return False
+        return None
     ctypes.memmove(ptr, payload, len(payload))
     kernel32.GlobalUnlock(h_global)
+    return h_global
 
-    opened = False
+
+def _open_clipboard_with_retry(owner_hwnd=None):
     for _ in range(3):
         if user32.OpenClipboard(owner_hwnd):
-            opened = True
-            break
+            return True
         time.sleep(0.01)
-    if not opened:
-        kernel32.GlobalFree(h_global)
+    return False
+
+
+def copy_file_to_clipboard(path_str, owner_hwnd=None):
+    """将本地文件本体写入系统剪贴板（对齐资源管理器多格式，兼容聊天软件、浏览器网页与桌面 AI 软件）。"""
+    p = Path(path_str)
+    if not p.is_file():
+        return False
+    hdrop_bytes, extra_formats = build_file_clipboard_payloads(p)
+    h_hdrop = _alloc_global_bytes(hdrop_bytes)
+    if not h_hdrop:
+        return False
+
+    if not _open_clipboard_with_retry(owner_hwnd):
+        kernel32.GlobalFree(h_hdrop)
         return False
 
     try:
         user32.EmptyClipboard()
-        if not user32.SetClipboardData(CF_HDROP, h_global):
-            kernel32.GlobalFree(h_global)
+        if not user32.SetClipboardData(CF_HDROP, h_hdrop):
+            kernel32.GlobalFree(h_hdrop)
             return False
-        # SetClipboardData 成功后 h_global 所有权归属系统剪贴板，严禁再调用 GlobalFree
+        # SetClipboardData 成功后 h_hdrop 所有权归属系统剪贴板；继续补充 Shell 扩展格式以兼容桌面 AI 客户端
+        for fmt_name, fmt_bytes in extra_formats:
+            fmt_id = user32.RegisterClipboardFormatW(fmt_name)
+            if not fmt_id:
+                continue
+            h_ext = _alloc_global_bytes(fmt_bytes)
+            if not h_ext:
+                continue
+            if not user32.SetClipboardData(fmt_id, h_ext):
+                kernel32.GlobalFree(h_ext)
+        return True
+    finally:
+        user32.CloseClipboard()
+
+
+def copy_path_to_clipboard(path_str, owner_hwnd=None):
+    """将文件完整路径纯文本写入剪贴板（用于传统网页上传弹窗底部直接粘贴路径秒开）。"""
+    p = Path(path_str)
+    if not p.exists():
+        return False
+    text_bytes = str(p.resolve()).encode('utf-16-le') + b'\x00\x00'
+    h_text = _alloc_global_bytes(text_bytes)
+    if not h_text:
+        return False
+    if not _open_clipboard_with_retry(owner_hwnd):
+        kernel32.GlobalFree(h_text)
+        return False
+    try:
+        user32.EmptyClipboard()
+        if not user32.SetClipboardData(CF_UNICODETEXT, h_text):
+            kernel32.GlobalFree(h_text)
+            return False
         return True
     finally:
         user32.CloseClipboard()
@@ -244,13 +324,16 @@ def turn_off_monitors():
     user32.PostMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
 
 
-def _running_deskkit_port(start_port=18642, span=6):
+def _running_deskkit_port(start_port=18642, span=20):
+    """探测已运行的 DeskKit 本地服务端口（对齐全部 20 个候选端口并校验健康响应载荷）。"""
     for port in range(start_port, start_port + span):
         try:
-            with urlopen(f'http://127.0.0.1:{port}/api/health', timeout=0.15) as resp:
+            with urlopen(f'http://127.0.0.1:{port}/api/health', timeout=0.08) as resp:
                 if resp.status == 200:
-                    return port
-        except OSError:
+                    data = json.loads(resp.read(4096).decode('utf-8', 'replace'))
+                    if isinstance(data, dict) and data.get('ok') is True:
+                        return port
+        except (OSError, ValueError):
             continue
     return None
 
