@@ -1,15 +1,19 @@
-"""右侧快捷中枢核心能力：最新文件自动速取、随手便签清洗、倒计时格式化、屏幕常亮/息屏与本地工具箱联动。"""
+"""右侧快捷中枢核心能力：最新文件自动速取、一键复制文件到剪贴板、随手便签清洗、倒计时格式化、屏幕常亮/息屏与本地工具箱联动。"""
+import ctypes
+from ctypes import wintypes
 import math
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from urllib.request import urlopen
 import webbrowser
 import winreg
 
 from win32 import (user32, kernel32, HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER,
-                   ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED)
+                   ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED,
+                   CF_HDROP, GMEM_MOVEABLE)
 
 _SHELL_FOLDERS_KEY = r'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
 _DOWNLOADS_GUID = '{374DE290-123F-4565-9164-39C4925E467B}'
@@ -125,6 +129,63 @@ def reveal_in_explorer(path_str):
         subprocess.Popen(['explorer.exe', f'/select,{p}'], creationflags=creationflags)
         return True
     return False
+
+
+class _DROPFILES(ctypes.Structure):
+    _fields_ = [
+        ('pFiles', wintypes.DWORD),
+        ('pt', wintypes.POINT),
+        ('fNC', wintypes.BOOL),
+        ('fWide', wintypes.BOOL),
+    ]
+
+
+def build_cf_hdrop_bytes(path_str):
+    """构造 Windows 标准 CF_HDROP 剪贴板内存载荷（UTF-16LE 双空结尾），支持微信/QQ/资源管理器直接 Ctrl+V 粘贴文件。"""
+    resolved = str(Path(path_str).resolve())
+    header = _DROPFILES()
+    header.pFiles = ctypes.sizeof(_DROPFILES)
+    header.fWide = True
+    # 单个 UTF-16LE 路径以 \x00\x00 结尾，文件列表再以额外 \x00\x00 结束
+    path_bytes = resolved.encode('utf-16-le') + b'\x00\x00\x00\x00'
+    return bytes(header) + path_bytes
+
+
+def copy_file_to_clipboard(path_str, owner_hwnd=None):
+    """将本地文件本体（CF_HDROP）写入系统剪贴板，成功返回 True。"""
+    p = Path(path_str)
+    if not p.is_file():
+        return False
+    payload = build_cf_hdrop_bytes(p)
+    h_global = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(payload))
+    if not h_global:
+        return False
+    ptr = kernel32.GlobalLock(h_global)
+    if not ptr:
+        kernel32.GlobalFree(h_global)
+        return False
+    ctypes.memmove(ptr, payload, len(payload))
+    kernel32.GlobalUnlock(h_global)
+
+    opened = False
+    for _ in range(3):
+        if user32.OpenClipboard(owner_hwnd):
+            opened = True
+            break
+        time.sleep(0.01)
+    if not opened:
+        kernel32.GlobalFree(h_global)
+        return False
+
+    try:
+        user32.EmptyClipboard()
+        if not user32.SetClipboardData(CF_HDROP, h_global):
+            kernel32.GlobalFree(h_global)
+            return False
+        # SetClipboardData 成功后 h_global 所有权归属系统剪贴板，严禁再调用 GlobalFree
+        return True
+    finally:
+        user32.CloseClipboard()
 
 
 def sanitize_notes(raw):

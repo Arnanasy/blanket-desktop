@@ -90,6 +90,8 @@ SMTO_ABORTIFHUNG = 0x0002
 ES_SYSTEM_REQUIRED = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 ES_CONTINUOUS = 0x80000000
+CF_HDROP = 15
+GMEM_MOVEABLE = 0x0002
 
 # 系统度量
 SM_CXSCREEN = 0
@@ -271,6 +273,10 @@ _sig(user32.MessageBoxW, INT, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, UINT)
 _sig(user32.PostMessageW, BOOL, HWND, UINT, wintypes.WPARAM, wintypes.LPARAM)
 _sig(user32.RegisterHotKey, BOOL, HWND, INT, UINT, UINT)
 _sig(user32.UnregisterHotKey, BOOL, HWND, INT)
+_sig(user32.OpenClipboard, BOOL, HWND)
+_sig(user32.EmptyClipboard, BOOL)
+_sig(user32.SetClipboardData, H, UINT, H)
+_sig(user32.CloseClipboard, BOOL)
 
 try:
     GetWindowLongPtr = _sig(user32.GetWindowLongPtrW, LONG_PTR, HWND, INT)
@@ -289,6 +295,10 @@ _sig(kernel32.CloseHandle, BOOL, H)
 _sig(kernel32.WaitForSingleObject, DWORD, H, DWORD)
 _sig(kernel32.GetTickCount, DWORD)
 _sig(kernel32.SetThreadExecutionState, DWORD, DWORD)
+_sig(kernel32.GlobalAlloc, H, UINT, ctypes.c_size_t)
+_sig(kernel32.GlobalLock, wintypes.LPVOID, H)
+_sig(kernel32.GlobalUnlock, BOOL, H)
+_sig(kernel32.GlobalFree, H, H)
 _sig(kernel32.GetStdHandle, H, DWORD)
 _sig(kernel32.GetSystemTimes, BOOL, ctypes.POINTER(wintypes.FILETIME),
      ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME))

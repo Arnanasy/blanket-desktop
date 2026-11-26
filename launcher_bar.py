@@ -13,9 +13,9 @@ from tkinter import filedialog, messagebox, simpledialog
 
 from display_geometry import bounds
 from preferences import APP_DIR
-from quick_hub import (MAX_NOTES, MAX_NOTE_LEN, KeepAwake, launch_deskkit,
-                       reveal_in_explorer, sanitize_notes, scan_recent_files,
-                       turn_off_monitors)
+from quick_hub import (MAX_NOTES, MAX_NOTE_LEN, KeepAwake, copy_file_to_clipboard,
+                       launch_deskkit, reveal_in_explorer, sanitize_notes,
+                       scan_recent_files, turn_off_monitors)
 from win32 import (GetWindowLongPtr, SetWindowLongPtr, add_exstyle, toplevel_hwnd,
                    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
 
@@ -175,8 +175,8 @@ class LauncherBar:
                 b = self._pill_btn(t_row, lbl, cmd)
                 b.grid(row=0, column=idx, sticky='ew', padx=2)
 
-        # 3. 最新文件速取（自动扫描下载与桌面 Top 5，独立局部容器刷新不打断便签输入）
-        files_card = self._card('⚡ 最新文件（左键打开 · 右键定位）')
+        # 3. 最新文件速取（自动扫描下载与桌面 Top 5，支持一键复制文件本体直接去微信 Ctrl+V 粘贴）
+        files_card = self._card('⚡ 最新文件（左键打开 · 右键定位 · 点复制去粘贴）')
         self.files_box = tk.Frame(files_card, bg=CARD_BG)
         self.files_box.pack(fill='x')
         self._populate_files_box()
@@ -363,6 +363,17 @@ class LauncherBar:
             self._refresh_if_visible()
 
     # ------------------------------------------------------------ 文件与分组操作
+    def _copy_file_item(self, path_str, btn_widget):
+        if not copy_file_to_clipboard(path_str, self.hwnd):
+            self._show_error(f'无法复制文件（可能已被移动或删除）：\n{path_str}')
+            self._refresh_recent_files(force=True)
+            return
+        if btn_widget and btn_widget.winfo_exists():
+            btn_widget.configure(text='✓ 已复制', bg=GREEN_ACTIVE)
+            self.win.after(1200, lambda: (
+                btn_widget.configure(text='复制', bg='#334155') if btn_widget.winfo_exists() else None
+            ))
+
     def _populate_files_box(self):
         if self.files_box is None or not self.files_box.winfo_exists():
             return
@@ -373,14 +384,24 @@ class LauncherBar:
                      font=('Microsoft YaHei UI', 8), anchor='w').pack(fill='x', pady=2)
             return
         for item in self.fresh_files:
-            disp = f"{item['icon']} [{item['source']}] {_clip(item['name'], 18)}"
+            row = tk.Frame(self.files_box, bg=CARD_BG)
+            row.pack(fill='x', pady=1)
+            disp = f"{item['icon']} [{item['source']}] {_clip(item['name'], 14)}"
             fb = tk.Button(
-                self.files_box, text=disp, command=lambda p=item['path']: self.open(p, record_recent=False),
+                row, text=disp, command=lambda p=item['path']: self.open(p, record_recent=False),
                 bg=ITEM_BG, fg=TEXT_FG, activebackground=ACTIVE_BG, activeforeground='white',
-                font=('Microsoft YaHei UI', 9), relief='flat', anchor='w', padx=8, pady=4, cursor='hand2',
+                font=('Microsoft YaHei UI', 9), relief='flat', anchor='w', padx=6, pady=4, cursor='hand2',
             )
-            fb.pack(fill='x', pady=1)
+            fb.pack(side='left', fill='x', expand=True, padx=(0, 3))
             fb.bind('<Button-3>', lambda _e, p=item['path']: self._reveal_file(p))
+
+            cp_btn = tk.Button(
+                row, text='复制', bg='#334155', fg=TEXT_FG,
+                activebackground=GREEN_ACTIVE, activeforeground='white',
+                font=('Microsoft YaHei UI', 8), relief='flat', padx=6, pady=4, cursor='hand2',
+            )
+            cp_btn.configure(command=lambda p=item['path'], b=cp_btn: self._copy_file_item(p, b))
+            cp_btn.pack(side='right')
 
     def _refresh_recent_files(self, force=False):
         now = time.monotonic()

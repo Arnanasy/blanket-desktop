@@ -141,6 +141,45 @@ class TestPreferences(unittest.TestCase):
             self.assertIn((preferences.RUN_KEY, 'JingZhuoMian'), deleted)
             self.assertIn((preferences.STARTUP_APPROVED_KEY, 'JingZhuoMian'), deleted)
 
+    def test_real_winreg_autostart_set_and_repair_in_isolated_key(self):
+        """在真实 Windows 注册表的独立临时测试子键下实测开机自启写入、路径自修复、旧键迁移与清理（零触碰真实系统自启项）。"""
+        import winreg
+        test_root = f'Software\\Blanket_UnitTest_{os.getpid()}'
+        run_sub = f'{test_root}\\Run'
+        app_sub = f'{test_root}\\StartupApproved'
+
+        def cleanup_tree():
+            for sub in (run_sub, app_sub, test_root):
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, sub)
+                except OSError:
+                    pass
+
+        winreg.CreateKey(winreg.HKEY_CURRENT_USER, run_sub).Close()
+        winreg.CreateKey(winreg.HKEY_CURRENT_USER, app_sub).Close()
+        try:
+            with mock.patch.object(preferences, 'RUN_KEY', run_sub), \
+                 mock.patch.object(preferences, 'STARTUP_APPROVED_KEY', app_sub):
+                # 1. 初始未开启
+                self.assertFalse(preferences.autostart_enabled())
+                self.assertFalse(preferences.repair_autostart())
+
+                # 2. 模拟存在旧版 JingZhuoMian 指向旧文件夹路径 -> repair_autostart 真实迁移并修复路径
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_sub, 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.SetValueEx(k, 'JingZhuoMian', 0, winreg.REG_SZ, r'"C:\OldPython\pythonw.exe" "D:\OldDir\launch.pyw"')
+                self.assertFalse(preferences.autostart_enabled())
+                self.assertTrue(preferences.repair_autostart())
+                self.assertTrue(preferences.autostart_enabled())
+                self.assertIsNone(preferences._registered_command('JingZhuoMian'))
+                self.assertEqual(preferences._registered_command('Blanket'), preferences.autostart_command())
+
+                # 3. 关闭自启后，Run 与 StartupApproved 下的记录均应被真实清空
+                self.assertTrue(preferences.set_autostart(False))
+                self.assertFalse(preferences.autostart_enabled())
+                self.assertIsNone(preferences._registered_command('Blanket'))
+        finally:
+            cleanup_tree()
+
 
 class TestLocalWeather(unittest.TestCase):
     """天气缓存命中、日期匹配、国内源解析与海外回退逻辑。"""
@@ -533,6 +572,36 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         with mock.patch.object(uh.tkfont, 'families', return_value=fake_fams):
             filtered = uh.usable_fonts(('Microsoft YaHei UI', 'Segoe UI'))
             self.assertEqual(filtered, ['Microsoft YaHei UI', 'Segoe UI'])
+
+        # 验证 CF_HDROP 文件剪贴板二进制结构与内存句柄释放安全性
+        with tempfile.TemporaryDirectory() as tmp2:
+            sample_f = Path(tmp2) / '微信待发合同.pdf'
+            sample_f.write_bytes(b'%PDF-1.4')
+            blob = qh.build_cf_hdrop_bytes(sample_f)
+            # 前 20 字节为 DROPFILES，pFiles=20, fWide=1
+            self.assertEqual(int.from_bytes(blob[0:4], 'little'), 20)
+            self.assertEqual(int.from_bytes(blob[16:20], 'little'), 1)
+            self.assertTrue(blob.endswith(b'\x00\x00\x00\x00'))
+            decoded_path = blob[20:-4].decode('utf-16-le')
+            self.assertEqual(decoded_path, str(sample_f.resolve()))
+
+            # SetClipboardData 成功时不得误调 GlobalFree；失败时必须调用 GlobalFree 防泄漏
+            freed = []
+            buf = ctypes.create_string_buffer(len(blob) + 16)
+            addr = ctypes.addressof(buf)
+            with mock.patch.object(qh.kernel32, 'GlobalAlloc', return_value=addr), \
+                 mock.patch.object(qh.kernel32, 'GlobalLock', return_value=addr), \
+                 mock.patch.object(qh.kernel32, 'GlobalUnlock', return_value=1), \
+                 mock.patch.object(qh.kernel32, 'GlobalFree', side_effect=lambda h: freed.append(h) or 0), \
+                 mock.patch.object(qh.user32, 'OpenClipboard', return_value=1), \
+                 mock.patch.object(qh.user32, 'EmptyClipboard', return_value=1), \
+                 mock.patch.object(qh.user32, 'CloseClipboard', return_value=1):
+                with mock.patch.object(qh.user32, 'SetClipboardData', return_value=addr):
+                    self.assertTrue(qh.copy_file_to_clipboard(sample_f))
+                    self.assertEqual(freed, [])
+                with mock.patch.object(qh.user32, 'SetClipboardData', return_value=0):
+                    self.assertFalse(qh.copy_file_to_clipboard(sample_f))
+                    self.assertEqual(freed, [addr])
 
 
 if __name__ == '__main__':
