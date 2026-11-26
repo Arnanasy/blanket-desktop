@@ -233,7 +233,7 @@ class Widgets:
         self.bar.close()
         for win in (self.clock, self.theme_button.win, self.bar.win, self.monitor.win,
                     self.media.win, self.media.lyrics.win, self.media.dialog,
-                    self.countdown.win, self.settings_window, self.monitor.dialog):
+                    self.countdown.win, self.countdown.dialog, self.settings_window, self.monitor.dialog):
             if win is not None:
                 try:
                     win.withdraw()
@@ -752,10 +752,10 @@ class Widgets:
             suppress_edge=theme_edge or mouse_buttons_held, foreground=foreground, guard=guard,
         )
         self.media.tick(now, blocked, icons, on_desktop=on_desktop, force_restack=restack, guard=passthrough)
-        cd_done, cd_text = self.countdown.tick(now, blocked, on_desktop=on_desktop, force_restack=restack, guard=guard)
+        cd_done, cd_text, cd_msg = self.countdown.tick(now, blocked, on_desktop=on_desktop, force_restack=restack, guard=guard)
         if cd_done:
             try:
-                self.app.tray.notify('Blanket 倒计时结束', f'设定的「{self.countdown.label or "倒计时"}」时间已到！')
+                self.app.tray.notify(f'Blanket · {self.countdown.label or "倒计时"}结束', cd_msg or '时间已到！')
             except Exception:
                 pass
             self.bar.refresh_countdown_ui()

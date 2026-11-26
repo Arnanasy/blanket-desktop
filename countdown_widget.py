@@ -1,12 +1,15 @@
 """独立可自由移动的桌面番茄钟 / 倒计时挂件：
-- 平时完全隐身，开启倒计时后自动浮现，到点醒目提示 8 秒并推送托盘通知后自动隐藏；
+- 平时完全隐身，开启倒计时后自动浮现，到点随机显示一句提示语并推送托盘通知；
 - 左键按住可自由拖动到任意屏幕位置（跨分辨率相对锚点自动记忆）；
-- Ctrl + 滚轮调字号大小，Shift + 滚轮调透明度，右键菜单支持暂停/继续、切换卡片/透明样式与取消；
+- Ctrl + 滚轮调字号大小，Shift + 滚轮调透明度；
+- 右键支持暂停/继续、打开外观与提示语设置（字号、透明度、样式、文字/背景颜色、自定义随机结束语）与关闭；
 - 游戏/窗口防误触开启时自动转为鼠标穿透，绝不抢点击。
 """
+import random
+import re
 import time
 import tkinter as tk
-from tkinter import font as tkfont
+from tkinter import colorchooser, font as tkfont, ttk
 
 from quick_hub import format_countdown
 from widget_layout import capture_anchor, clamp_to_work_area, resolve_anchor
@@ -17,7 +20,48 @@ KEY_COLOR = '#010203'
 DRAG_THRESHOLD = 5
 DEFAULT_POS = [40, 200]
 STYLES = ('圆角卡片', '极简透明')
-DEFAULTS = dict(size=22, opacity=92, style='圆角卡片')
+DEFAULTS = dict(
+    size=22,
+    opacity=92,
+    style='圆角卡片',
+    fg='#F8FAFC',
+    bg='#18202D',
+    done_fg='#FACC15',
+)
+
+DEFAULT_FINISH_QUOTES = (
+    '时间到啦，起来伸个懒腰喝口水吧～',
+    '这一轮专注完成！看看远处放松眼睛 20 秒',
+    '叮！休息一下，好灵感常常在走神时冒出来',
+    '干得漂亮，活动一下肩膀和脖子吧',
+    '倒计时结束，站起来走两步给大脑充个电',
+    '本轮达成！记得喝口温水，眨眨眼睛',
+    '辛苦啦，稍微喘口气再继续下一程',
+    '铃声响啦，此刻最适合放空一分钟',
+    '专注完成！离开屏幕看点远处的风景吧',
+    '叮咚，你已经稳稳拿下这一段时间啦',
+    '时间到！伸展双手，慢慢深呼吸三次',
+    '小小里程碑达成，歇一会儿再出发',
+)
+
+_HEX_COLOR_RE = re.compile(r'#[0-9a-fA-F]{6}')
+
+
+def sanitize_quotes(raw):
+    """清洗自定义结束语列表（单句上限 48 字、最多 50 句；为空时回退内置默认句子）。"""
+    if isinstance(raw, list):
+        cleaned = [str(s).strip()[:48] for s in raw if isinstance(s, str) and s.strip()]
+        if cleaned:
+            return cleaned[:50]
+    return list(DEFAULT_FINISH_QUOTES)
+
+
+def pick_finish_quote(quotes, last_quote=''):
+    """从结束语列表中随机抽取一句（多于 1 句时自动避开与上次重复）。"""
+    pool = sanitize_quotes(quotes)
+    if len(pool) > 1 and last_quote in pool:
+        pool = [q for q in pool if q != last_quote]
+    return random.choice(pool)
 
 
 def sanitize_countdown_cfg(raw):
@@ -29,6 +73,10 @@ def sanitize_countdown_cfg(raw):
             cfg['opacity'] = max(35, min(100, raw['opacity']))
         if raw.get('style') in STYLES:
             cfg['style'] = raw['style']
+        for k in ('fg', 'bg', 'done_fg'):
+            val = raw.get(k)
+            if isinstance(val, str) and _HEX_COLOR_RE.fullmatch(val):
+                cfg[k] = val
     return cfg
 
 
@@ -40,6 +88,7 @@ class CountdownWidget:
         cfg = cfg if isinstance(cfg, dict) else {}
 
         self.prefs = sanitize_countdown_cfg(cfg)
+        self.quotes = sanitize_quotes(cfg.get('quotes'))
         pos = cfg.get('position')
         if not (isinstance(pos, list) and len(pos) == 2 and all(type(v) is int for v in pos)):
             pos = list(DEFAULT_POS)
@@ -51,17 +100,19 @@ class CountdownWidget:
         self.paused_rem = 0.0
         self.label = '专注'
         self.done_until = 0.0
+        self._finish_msg = ''
         self._last_text = ''
         self._last_alpha = None
         self._guarded = False
         self._font_key = None
         self._font = None
-        self._hint_timer = None
 
-        # 拖动状态
+        # 拖动与设置窗状态
         self._drag_origin = None
         self._drag_offset = None
         self._dragging = False
+        self.dialog = None
+        self._dlg_vars = {}
 
         self.win = tk.Toplevel(self.root)
         self.win.withdraw()
@@ -85,6 +136,7 @@ class CountdownWidget:
         return {
             'position': list(self.pos),
             'anchor': self.anchor,
+            'quotes': list(self.quotes),
             **self.prefs,
         }
 
@@ -128,7 +180,7 @@ class CountdownWidget:
             if rem > 0:
                 return format_countdown(rem, self.label)
         if self.done_until > now_t:
-            return f'🔔 {self.label}时间到！'
+            return f'🔔 {self._finish_msg or (self.label + "时间到！")}'
         return ''
 
     # ------------------------------------------------------------ 绘制与布局
@@ -157,14 +209,14 @@ class CountdownWidget:
         c.delete('all')
 
         is_done = text.startswith('🔔')
-        fg = '#FACC15' if is_done else '#F8FAFC'
+        fg = self.prefs['done_fg'] if is_done else self.prefs['fg']
+        bg = self.prefs['bg']
         if self.prefs['style'] == '圆角卡片':
             r = min(16, h // 2)
-            bg = '#78350F' if is_done else '#18202D'
             c.create_polygon(
                 r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
                 w - r, h, r, h, 0, h, 0, h - r, 0, r, 0, 0,
-                smooth=True, splinesteps=20, fill=bg, outline='#334155',
+                smooth=True, splinesteps=20, fill=bg, outline='#475569',
             )
             c.create_text(w / 2, h / 2, text=text, font=self._font, fill=fg, anchor='center')
         else:
@@ -180,7 +232,7 @@ class CountdownWidget:
         self.pos = [x, y]
         place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop)
 
-    # ------------------------------------------------------------ 交互（自由拖动 / 滚轮 / 右键）
+    # ------------------------------------------------------------ 交互（自由拖动 / 滚轮 / 右键 / 设置窗）
     def _on_press(self, e):
         if self._guarded:
             return
@@ -210,26 +262,130 @@ class CountdownWidget:
             w, h = self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight()
             self.anchor = capture_anchor(self.pos[0], self.pos[1], w, h)
             self.on_save()
+        elif not self.active and self.done_until > time.monotonic():
+            # 到点提示语出现期间，轻点一下即可提前关闭
+            self.done_until = 0.0
+            self._last_text = ''
 
     def _on_wheel(self, event):
         if self._guarded or not event.delta:
             return
         direction = 1 if event.delta > 0 else -1
         if event.state & 4:  # Ctrl + 滚轮调大小
-            self.prefs['size'] = max(14, min(56, self.prefs['size'] + direction * 2))
+            val = max(14, min(56, self.prefs['size'] + direction * 2))
+            self.prefs['size'] = val
+            if self.dialog and self.dialog.winfo_exists() and 'size' in self._dlg_vars:
+                self._dlg_vars['size'].set(val)
             self._last_text = ''
             self.widgets.queue_save()
             return 'break'
         if event.state & 1:  # Shift + 滚轮调透明度
-            self.prefs['opacity'] = max(35, min(100, self.prefs['opacity'] + direction * 5))
+            val = max(35, min(100, self.prefs['opacity'] + direction * 5))
+            self.prefs['opacity'] = val
+            if self.dialog and self.dialog.winfo_exists() and 'opacity' in self._dlg_vars:
+                self._dlg_vars['opacity'].set(val)
             self._last_text = ''
             self.widgets.queue_save()
             return 'break'
 
     def _toggle_style(self):
         self.prefs['style'] = STYLES[1] if self.prefs['style'] == STYLES[0] else STYLES[0]
+        if self.dialog and self.dialog.winfo_exists() and 'style' in self._dlg_vars:
+            self._dlg_vars['style'].set(self.prefs['style'])
         self._last_text = ''
         self.on_save()
+
+    def open_settings(self):
+        if self.dialog and self.dialog.winfo_exists():
+            self.dialog.lift()
+            return
+        w = self.dialog = tk.Toplevel(self.root)
+        w.title('番茄钟外观与提示语设置')
+        ui = max(1.0, getattr(self.widgets, 'ui_scale', 1.0))
+        w.geometry(f'{round(430 * ui)}x{round(480 * ui)}')
+        w.minsize(380, 420)
+
+        pane = ttk.Frame(w, padding=14)
+        pane.pack(fill='both', expand=True)
+        ttk.Label(pane, text='番茄钟外观 · 修改实时生效', font=('Microsoft YaHei UI', 11, 'bold')).pack(anchor='w', pady=(0, 8))
+
+        vars_ = self._dlg_vars = {}
+
+        def apply(*_args):
+            self.prefs['size'] = int(vars_['size'].get())
+            self.prefs['opacity'] = int(vars_['opacity'].get())
+            self.prefs['style'] = vars_['style'].get()
+            self.prefs = sanitize_countdown_cfg(self.prefs)
+            self._last_text = ''
+            self.widgets.queue_save()
+
+        def row(lbl):
+            f = ttk.Frame(pane)
+            f.pack(fill='x', pady=3)
+            ttk.Label(f, text=lbl, width=10).pack(side='left')
+            return f
+
+        for k, lbl, lo, hi in (('size', '字号大小', 14, 56), ('opacity', '不透明度%', 35, 100)):
+            v = vars_[k] = tk.IntVar(value=self.prefs[k])
+            tk.Scale(row(lbl), from_=lo, to=hi, orient='horizontal', variable=v,
+                     command=apply, showvalue=True).pack(side='left', fill='x', expand=True)
+
+        st_v = vars_['style'] = tk.StringVar(value=self.prefs['style'])
+        cb = ttk.Combobox(row('背景样式'), textvariable=st_v, values=list(STYLES), state='readonly', width=18)
+        cb.pack(side='left')
+        cb.bind('<<ComboboxSelected>>', apply)
+
+        def pick_col(key, title):
+            col = colorchooser.askcolor(self.prefs[key], parent=w, title=title)[1]
+            if col:
+                self.prefs[key] = col
+                apply()
+
+        c_row = row('自定义颜色')
+        ttk.Button(c_row, text='文字色', command=lambda: pick_col('fg', '选择倒计时文字颜色')).pack(side='left', padx=2)
+        ttk.Button(c_row, text='卡片底色', command=lambda: pick_col('bg', '选择卡片背景颜色')).pack(side='left', padx=2)
+        ttk.Button(c_row, text='到点高亮色', command=lambda: pick_col('done_fg', '选择到点提醒文字颜色')).pack(side='left', padx=2)
+
+        ttk.Separator(pane, orient='horizontal').pack(fill='x', pady=8)
+        ttk.Label(pane, text='倒计时结束随机提示语（每行一句，留空则使用默认句子）：').pack(anchor='w', pady=(0, 4))
+
+        txt = tk.Text(pane, height=8, font=('Microsoft YaHei UI', 9), wrap='word')
+        txt.pack(fill='both', expand=True)
+        txt.insert('1.0', '\n'.join(self.quotes))
+
+        def save_quotes():
+            lines = txt.get('1.0', 'end').splitlines()
+            self.quotes = sanitize_quotes(lines)
+            self.on_save()
+
+        def reset_all():
+            self.prefs = DEFAULTS.copy()
+            self.quotes = list(DEFAULT_FINISH_QUOTES)
+            vars_['size'].set(self.prefs['size'])
+            vars_['opacity'].set(self.prefs['opacity'])
+            vars_['style'].set(self.prefs['style'])
+            txt.delete('1.0', 'end')
+            txt.insert('1.0', '\n'.join(self.quotes))
+            self._last_text = ''
+            self.on_save()
+
+        def test_quote():
+            save_quotes()
+            self._finish_msg = pick_finish_quote(self.quotes, self._finish_msg)
+            self.done_until = time.monotonic() + 6.0
+            self._last_text = ''
+
+        def on_close():
+            save_quotes()
+            w.destroy()
+
+        w.protocol('WM_DELETE_WINDOW', on_close)
+
+        btns = ttk.Frame(pane)
+        btns.pack(fill='x', pady=(8, 0))
+        ttk.Button(btns, text='恢复默认', command=reset_all).pack(side='left')
+        ttk.Button(btns, text='随机试看一句', command=test_quote).pack(side='left', padx=6)
+        ttk.Button(btns, text='保存并关闭', command=on_close).pack(side='right')
 
     def _on_right_click(self, e):
         if self._guarded:
@@ -238,8 +394,9 @@ class CountdownWidget:
         if self.active:
             menu.add_command(label='继续倒计时' if self.paused_rem > 0 else '暂停倒计时',
                              command=self.toggle_pause)
+        menu.add_command(label='外观与提示语设置…', command=self.open_settings)
         next_style = STYLES[1] if self.prefs['style'] == STYLES[0] else STYLES[0]
-        menu.add_command(label=f'切换为{next_style}', command=self._toggle_style)
+        menu.add_command(label=f'快速切换为{next_style}', command=self._toggle_style)
         menu.add_separator()
         menu.add_command(label='关闭倒计时', command=self.widgets.cancel_countdown)
         try:
@@ -250,9 +407,12 @@ class CountdownWidget:
     # ------------------------------------------------------------ 主循环调度
     def tick(self, now, blocked, on_desktop=False, force_restack=False, guard=False):
         finished_now = False
+        finish_msg = ''
         if self.end_at > 0 and now >= self.end_at:
             self.end_at = 0.0
-            self.done_until = now + 8.0
+            self._finish_msg = pick_finish_quote(self.quotes, self._finish_msg)
+            finish_msg = self._finish_msg
+            self.done_until = now + 12.0
             self._last_text = ''
             finished_now = True
 
@@ -279,4 +439,4 @@ class CountdownWidget:
         elif visible:
             self.win.withdraw()
 
-        return finished_now, text
+        return finished_now, text, finish_msg

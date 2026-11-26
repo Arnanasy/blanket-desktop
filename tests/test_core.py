@@ -619,11 +619,17 @@ class TestClockExtrasAndLayout(unittest.TestCase):
                     self.assertFalse(qh.copy_file_to_clipboard(sample_f))
                     self.assertEqual(freed, [addr])
 
-        # 验证独立番茄钟配置清洗边界
+        # 验证独立番茄钟配置清洗、自定义颜色与随机结束语（防连续重复）
         import countdown_widget as cw
-        c_cfg = cw.sanitize_countdown_cfg({'size': 999, 'opacity': 10, 'style': '未知'})
-        self.assertEqual(c_cfg, {'size': 56, 'opacity': 35, 'style': '圆角卡片'})
-        self.assertEqual(cw.sanitize_countdown_cfg({'style': '极简透明'})['style'], '极简透明')
+        c_cfg = cw.sanitize_countdown_cfg({'size': 999, 'opacity': 10, 'style': '未知', 'fg': 'bad', 'bg': '#112233'})
+        self.assertEqual(c_cfg['size'], 56)
+        self.assertEqual(c_cfg['opacity'], 35)
+        self.assertEqual(c_cfg['style'], '圆角卡片')
+        self.assertEqual(c_cfg['fg'], cw.DEFAULTS['fg'])
+        self.assertEqual(c_cfg['bg'], '#112233')
+        self.assertEqual(cw.sanitize_quotes([]), list(cw.DEFAULT_FINISH_QUOTES))
+        self.assertEqual(cw.sanitize_quotes(['  喝口水  ', '']), ['喝口水'])
+        self.assertEqual(cw.pick_finish_quote(['句A', '句B'], last_quote='句A'), '句B')
 
 
 if __name__ == '__main__':
