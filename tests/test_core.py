@@ -631,6 +631,14 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         self.assertEqual(cw.sanitize_quotes(['  喝口水  ', '']), ['喝口水'])
         self.assertEqual(cw.pick_finish_quote(['句A', '句B'], last_quote='句A'), '句B')
 
+        # 验证右侧快捷中枢外观样式清洗边界
+        import launcher_bar as lb
+        bs = lb.sanitize_bar_style({'font_size': 99, 'opacity': 10, 'bg': 'bad', 'card_bg': '#FFFFFF'})
+        self.assertEqual(bs['font_size'], 14)
+        self.assertEqual(bs['opacity'], 45)
+        self.assertEqual(bs['bg'], lb.BAR_STYLE_DEFAULTS['bg'])
+        self.assertEqual(bs['card_bg'], '#FFFFFF')
+
 
 if __name__ == '__main__':
     unittest.main()

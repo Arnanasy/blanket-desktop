@@ -7,9 +7,10 @@
 """
 import os
 from pathlib import Path
+import re
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 from display_geometry import bounds
 from preferences import APP_DIR
@@ -26,6 +27,39 @@ ACTIVE_BG = '#334155'
 GREEN_ACTIVE = '#15803D'
 MUTED_FG = '#94A3B8'
 TEXT_FG = '#F1F5F9'
+
+_HEX_RE = re.compile(r'#[0-9a-fA-F]{6}')
+BAR_STYLE_DEFAULTS = dict(
+    font_size=9,
+    opacity=96,
+    bg='#0F172A',
+    card_bg='#1E293B',
+    item_bg='#263349',
+    fg='#F1F5F9',
+    muted_fg='#94A3B8',
+    accent='#38BDF8',
+)
+BAR_STYLE_PRESETS = {
+    '深海暗夜': dict(bg='#0F172A', card_bg='#1E293B', item_bg='#263349', fg='#F1F5F9', muted_fg='#94A3B8', accent='#38BDF8'),
+    '磨砂纯白': dict(bg='#F1F5F9', card_bg='#FFFFFF', item_bg='#E2E8F0', fg='#0F172A', muted_fg='#64748B', accent='#2563EB'),
+    '极简炭黑': dict(bg='#111111', card_bg='#1C1C1E', item_bg='#2C2C2E', fg='#F5F5F7', muted_fg='#98989D', accent='#0A84FF'),
+}
+
+
+def sanitize_bar_style(raw):
+    style = BAR_STYLE_DEFAULTS.copy()
+    if isinstance(raw, dict):
+        fs = raw.get('font_size')
+        if isinstance(fs, int) and not isinstance(fs, bool):
+            style['font_size'] = max(8, min(14, fs))
+        op = raw.get('opacity')
+        if isinstance(op, int) and not isinstance(op, bool):
+            style['opacity'] = max(45, min(100, op))
+        for k in ('bg', 'card_bg', 'item_bg', 'fg', 'muted_fg', 'accent'):
+            val = raw.get(k)
+            if isinstance(val, str) and _HEX_RE.fullmatch(val):
+                style[k] = val
+    return style
 
 OPEN_DELAY = 0.18          # 鼠标贴右边缘多久后弹出（配合双阈值防回弹，轻靠即出）
 CLOSE_DELAY = 0.95         # 鼠标离开多久后收起
@@ -55,6 +89,10 @@ class LauncherBar:
         self.recent = [v for v in recent if isinstance(v, str)][:MAX_RECENT] if isinstance(recent, list) else []
         self.notes = sanitize_notes(cfg.get('notes', []))
         self.deskkit_path = str(cfg.get('deskkit_path', '') or '').strip()
+        self.style = sanitize_bar_style(cfg.get('bar_style'))
+        self.style_dialog = None
+        self._style_vars = {}
+        self._last_alpha = None
 
         self.enabled = tk.BooleanVar(value=bool(cfg.get('bar', True)))
         self.expanded = set()
@@ -106,29 +144,60 @@ class LauncherBar:
         self.win.withdraw()
 
     # ------------------------------------------------------------ 视觉小组件构建
+    def _c(self, key):
+        return self.style[key]
+
+    def _f(self, delta=0, bold=False, overstrike=False):
+        sz = max(7, self.style['font_size'] + delta)
+        parts = ['Microsoft YaHei UI', sz]
+        styles = []
+        if bold:
+            styles.append('bold')
+        if overstrike:
+            styles.append('overstrike')
+        if styles:
+            parts.append(' '.join(styles))
+        return tuple(parts)
+
     def _card(self, title=None):
-        frame = tk.Frame(self.win, bg=CARD_BG, padx=10, pady=8)
+        cbg = self._c('card_bg')
+        frame = tk.Frame(self.win, bg=cbg, padx=10, pady=8)
         frame.pack(fill='x', padx=8, pady=(6, 0))
         if title:
-            tk.Label(frame, text=title, bg=CARD_BG, fg=MUTED_FG,
-                     font=('Microsoft YaHei UI', 8, 'bold'), anchor='w').pack(fill='x', pady=(0, 4))
+            tk.Label(frame, text=title, bg=cbg, fg=self._c('muted_fg'),
+                     font=self._f(-1, bold=True), anchor='w').pack(fill='x', pady=(0, 4))
         return frame
 
-    def _pill_btn(self, parent, text, command, bg=ITEM_BG, fg=TEXT_FG):
+    def _pill_btn(self, parent, text, command, bg=None, fg=None):
+        bg = self._c('item_bg') if bg is None else bg
+        fg = self._c('fg') if fg is None else fg
         return tk.Button(
             parent, text=text, command=command, bg=bg, fg=fg,
-            activebackground=ACTIVE_BG, activeforeground='white',
-             font=('Microsoft YaHei UI', 9), relief='flat', borderwidth=0,
+            activebackground=self._c('accent'), activeforeground='white',
+            font=self._f(0), relief='flat', borderwidth=0,
             cursor='hand2', pady=5, padx=6,
         )
 
     def render(self):
+        bg = self._c('bg')
+        cbg = self._c('card_bg')
+        ibg = self._c('item_bg')
+        fg = self._c('fg')
+        mfg = self._c('muted_fg')
+        acc = self._c('accent')
+
+        self.win.configure(bg=bg, highlightbackground=ibg)
+        alpha = self.style['opacity'] / 100.0
+        if alpha != self._last_alpha:
+            self._last_alpha = alpha
+            self.win.attributes('-alpha', alpha)
+
         for child in self.win.winfo_children():
             child.destroy()
 
         # 1. 顶部快捷控制开关（2x2 网格）
         top_card = self._card('快捷开关')
-        grid = tk.Frame(top_card, bg=CARD_BG)
+        grid = tk.Frame(top_card, bg=cbg)
         grid.pack(fill='x')
         grid.columnconfigure((0, 1), weight=1, uniform='qbtn')
 
@@ -137,7 +206,8 @@ class LauncherBar:
             grid,
             '☕ 常亮开启中' if awake_on else '☕ 屏幕常亮',
             self._toggle_awake,
-            bg=GREEN_ACTIVE if awake_on else ITEM_BG,
+            bg=GREEN_ACTIVE if awake_on else ibg,
+            fg='white' if awake_on else fg,
         )
         self.awake_btn.grid(row=0, column=0, sticky='ew', padx=(0, 3), pady=(0, 4))
 
@@ -148,7 +218,7 @@ class LauncherBar:
         self.theme_item.grid(row=1, column=0, sticky='ew', padx=(0, 3))
         self.set_theme_label(self.widgets.theme_button.dark)
 
-        dk_btn = self._pill_btn(grid, '🧰 本地工具箱', self._open_deskkit, fg=self.widgets.accent)
+        dk_btn = self._pill_btn(grid, '🧰 本地工具箱', self._open_deskkit, fg=acc)
         dk_btn.grid(row=1, column=1, sticky='ew', padx=(3, 0))
         dk_btn.bind('<Button-3>', lambda _e: self._pick_deskkit_path())
 
@@ -156,18 +226,18 @@ class LauncherBar:
         cd_card = self._card('🍅 番茄钟（开启后可自由拖动）')
         cd_widget = getattr(self.widgets, 'countdown', None)
         if cd_widget is not None and cd_widget.active:
-            row = tk.Frame(cd_card, bg=CARD_BG)
+            row = tk.Frame(cd_card, bg=cbg)
             row.pack(fill='x')
             txt = self.widgets.current_countdown_text() or '⏳ 倒计时进行中'
             self.countdown_label = tk.Label(
-                row, text=txt, bg=CARD_BG, fg=self.widgets.accent,
-                font=('Microsoft YaHei UI', 9, 'bold'), anchor='w',
+                row, text=txt, bg=cbg, fg=acc,
+                font=self._f(0, bold=True), anchor='w',
             )
             self.countdown_label.pack(side='left', fill='x', expand=True)
-            self._pill_btn(row, '取消', self._cancel_timer, bg='#7F1D1D').pack(side='right')
+            self._pill_btn(row, '取消', self._cancel_timer, bg='#7F1D1D', fg='white').pack(side='right')
         else:
             self.countdown_label = None
-            t_row = tk.Frame(cd_card, bg=CARD_BG)
+            t_row = tk.Frame(cd_card, bg=cbg)
             t_row.pack(fill='x')
             t_row.columnconfigure((0, 1, 2, 3), weight=1, uniform='tbtn')
             for idx, (lbl, mins, tag) in enumerate([
@@ -179,7 +249,7 @@ class LauncherBar:
 
         # 3. 最新文件速取（自动扫描下载与桌面 Top 5，支持一键复制文件本体直接去微信 Ctrl+V 粘贴）
         files_card = self._card('⚡ 最新文件（左键打开 · 右键定位 · 点复制去粘贴）')
-        self.files_box = tk.Frame(files_card, bg=CARD_BG)
+        self.files_box = tk.Frame(files_card, bg=cbg)
         self.files_box.pack(fill='x')
         self._populate_files_box()
 
@@ -188,23 +258,22 @@ class LauncherBar:
         for idx, note in enumerate(self.notes):
             done = note.get('done', False)
             prefix = '☑ ' if done else '☐ '
-            fg_col = MUTED_FG if done else TEXT_FG
-            font_spec = ('Microsoft YaHei UI', 9, 'overstrike') if done else ('Microsoft YaHei UI', 9)
+            fg_col = mfg if done else fg
             nb = tk.Button(
                 note_card, text=prefix + _clip(note['text'], 22),
                 command=lambda i=idx: self._toggle_note(i),
-                bg=CARD_BG, fg=fg_col, activebackground=ACTIVE_BG, activeforeground='white',
-                font=font_spec, relief='flat', borderwidth=0, anchor='w', padx=4, pady=2, cursor='hand2',
+                bg=cbg, fg=fg_col, activebackground=ibg, activeforeground=fg,
+                font=self._f(0, overstrike=done), relief='flat', borderwidth=0, anchor='w', padx=4, pady=2, cursor='hand2',
             )
             nb.pack(fill='x')
             nb.bind('<Button-3>', lambda _e, i=idx: self._delete_note(i))
 
         if len(self.notes) < MAX_NOTES:
-            in_row = tk.Frame(note_card, bg=CARD_BG)
+            in_row = tk.Frame(note_card, bg=cbg)
             in_row.pack(fill='x', pady=(4, 0))
             entry = tk.Entry(
-                in_row, textvariable=self._note_draft, bg=BAR_BG, fg=TEXT_FG,
-                insertbackground=TEXT_FG, relief='flat', font=('Microsoft YaHei UI', 9),
+                in_row, textvariable=self._note_draft, bg=bg, fg=fg,
+                insertbackground=fg, relief='flat', font=self._f(0),
             )
             entry.pack(side='left', fill='x', expand=True, ipady=4, padx=(0, 4))
             entry.bind('<Button-1>', lambda _e, w=entry: self._focus_note_entry(w))
@@ -212,15 +281,15 @@ class LauncherBar:
             entry.bind('<FocusIn>', lambda _e: self._on_note_focus_in())
             entry.bind('<FocusOut>', lambda _e: setattr(self, '_note_focused', False))
             entry.bind('<Return>', lambda _e: self._add_note())
-            self._pill_btn(in_row, '＋添加', self._add_note, bg='#2563EB').pack(side='right')
+            self._pill_btn(in_row, '＋添加', self._add_note, bg='#2563EB', fg='white').pack(side='right')
 
         # 5. 可折叠的自定义分组（按需展开，平时仅占 1 行保持清爽）
         grp_card = self._card()
         toggle_txt = ('▾ ' if self.groups_section_open else '▸ ') + '自定义常用分组'
         tk.Button(
             grp_card, text=toggle_txt, command=self._toggle_groups_section,
-            bg=CARD_BG, fg=self.widgets.accent, activebackground=ACTIVE_BG, activeforeground='white',
-            font=('Microsoft YaHei UI', 9, 'bold'), relief='flat', anchor='w', padx=2, pady=2, cursor='hand2',
+            bg=cbg, fg=acc, activebackground=ibg, activeforeground=fg,
+            font=self._f(0, bold=True), relief='flat', anchor='w', padx=2, pady=2, cursor='hand2',
         ).pack(fill='x')
 
         if self.groups_section_open:
@@ -228,8 +297,8 @@ class LauncherBar:
                 hdr = tk.Button(
                     grp_card, text=('  ▾ ' if name in self.expanded else '  ▸ ') + name,
                     command=lambda n=name: self.fold(n),
-                    bg=CARD_BG, fg=TEXT_FG, activebackground=ACTIVE_BG, activeforeground='white',
-                    font=('Microsoft YaHei UI', 9), relief='flat', anchor='w', pady=2, cursor='hand2',
+                    bg=cbg, fg=fg, activebackground=ibg, activeforeground=fg,
+                    font=self._f(0), relief='flat', anchor='w', pady=2, cursor='hand2',
                 )
                 hdr.pack(fill='x')
                 if name not in DEFAULT_GROUPS:
@@ -241,25 +310,98 @@ class LauncherBar:
                         b = tk.Button(
                             grp_card, text='    ' + icon + _clip(label_txt, 18),
                             command=lambda p=path: self.open(p),
-                            bg=ITEM_BG, fg='white', activebackground=ACTIVE_BG,
-                            font=('Microsoft YaHei UI', 8), relief='flat', anchor='w', padx=8, pady=3, cursor='hand2',
+                            bg=ibg, fg=fg, activebackground=acc, activeforeground='white',
+                            font=self._f(-1), relief='flat', anchor='w', padx=8, pady=3, cursor='hand2',
                         )
                         b.pack(fill='x', pady=1)
                         b.bind('<Button-3>', lambda _e, n=name, p=path: self.remove(n, p))
-                    act_r = tk.Frame(grp_card, bg=CARD_BG)
+                    act_r = tk.Frame(grp_card, bg=cbg)
                     act_r.pack(fill='x', pady=2)
                     self._pill_btn(act_r, '＋软件/文件', lambda n=name: self.add(n, False)).pack(side='left', expand=True, fill='x', padx=(0, 2))
                     self._pill_btn(act_r, '＋文件夹', lambda n=name: self.add(n, True)).pack(side='left', expand=True, fill='x', padx=(2, 0))
             self._pill_btn(grp_card, '＋ 新建分组', self.create_group).pack(fill='x', pady=(4, 0))
 
-        # 6. 底部紧凑控制入口
-        foot = tk.Frame(self.win, bg=BAR_BG, padx=8, pady=8)
+        # 6. 底部紧凑控制入口（主面板 / 组件设置 / 面板外观）
+        foot = tk.Frame(self.win, bg=bg, padx=8, pady=8)
         foot.pack(fill='x')
-        foot.columnconfigure((0, 1), weight=1, uniform='fbtn')
-        self._pill_btn(foot, '⚙️ 主面板', self.app.open_settings).grid(row=0, column=0, sticky='ew', padx=(0, 3))
-        self._pill_btn(foot, '🎨 组件设置', self.widgets.settings).grid(row=0, column=1, sticky='ew', padx=(3, 0))
+        foot.columnconfigure((0, 1, 2), weight=1, uniform='fbtn')
+        self._pill_btn(foot, '⚙️ 主面板', self.app.open_settings).grid(row=0, column=0, sticky='ew', padx=(0, 2))
+        self._pill_btn(foot, '🎨 组件', self.widgets.settings).grid(row=0, column=1, sticky='ew', padx=2)
+        self._pill_btn(foot, '🖌️ 外观', self.open_style_settings).grid(row=0, column=2, sticky='ew', padx=(2, 0))
 
         self.win.update_idletasks()
+
+    def open_style_settings(self):
+        """打开右侧快捷中枢专属外观与颜色设置窗口（实时预览生效）。"""
+        if self.style_dialog and self.style_dialog.winfo_exists():
+            self.style_dialog.lift()
+            return
+        w = self.style_dialog = tk.Toplevel(self.widgets.root)
+        w.title('快捷中枢外观与颜色')
+        ui = max(1.0, getattr(self.widgets, 'ui_scale', 1.0))
+        w.geometry(f'{round(410 * ui)}x{round(360 * ui)}')
+        w.minsize(360, 320)
+
+        pane = ttk.Frame(w, padding=14)
+        pane.pack(fill='both', expand=True)
+        ttk.Label(pane, text='右侧快捷中枢外观 · 修改实时生效',
+                  font=('Microsoft YaHei UI', 11, 'bold')).pack(anchor='w', pady=(0, 8))
+
+        vars_ = self._style_vars = {}
+
+        def apply(*_args):
+            self.style['font_size'] = int(vars_['font_size'].get())
+            self.style['opacity'] = int(vars_['opacity'].get())
+            self.style = sanitize_bar_style(self.style)
+            self.render()
+            self._refresh_if_visible()
+            self.widgets.queue_save()
+
+        def row(lbl):
+            f = ttk.Frame(pane)
+            f.pack(fill='x', pady=4)
+            ttk.Label(f, text=lbl, width=10).pack(side='left')
+            return f
+
+        for k, lbl, lo, hi in (('font_size', '字号大小', 8, 14), ('opacity', '不透明度%', 45, 100)):
+            v = vars_[k] = tk.IntVar(value=self.style[k])
+            tk.Scale(row(lbl), from_=lo, to=hi, orient='horizontal', variable=v,
+                     command=apply, showvalue=True).pack(side='left', fill='x', expand=True)
+
+        def apply_preset(name):
+            self.style.update(BAR_STYLE_PRESETS[name])
+            apply()
+
+        p_row = row('一键配色')
+        for pname in BAR_STYLE_PRESETS:
+            ttk.Button(p_row, text=pname, command=lambda n=pname: apply_preset(n)).pack(side='left', padx=2)
+
+        def pick_col(key, title):
+            col = colorchooser.askcolor(self.style[key], parent=w, title=title)[1]
+            if col:
+                self.style[key] = col
+                apply()
+
+        c1 = row('背景配色')
+        ttk.Button(c1, text='面板底色', command=lambda: pick_col('bg', '选择面板底色')).pack(side='left', padx=2)
+        ttk.Button(c1, text='卡片底色', command=lambda: pick_col('card_bg', '选择分区卡片颜色')).pack(side='left', padx=2)
+        ttk.Button(c1, text='按钮颜色', command=lambda: pick_col('item_bg', '选择按钮背景颜色')).pack(side='left', padx=2)
+
+        c2 = row('文字配色')
+        ttk.Button(c2, text='主文字色', command=lambda: pick_col('fg', '选择主文字颜色')).pack(side='left', padx=2)
+        ttk.Button(c2, text='次要字色', command=lambda: pick_col('muted_fg', '选择标题/次要文字颜色')).pack(side='left', padx=2)
+        ttk.Button(c2, text='强调点缀色', command=lambda: pick_col('accent', '选择强调色')).pack(side='left', padx=2)
+
+        def reset_default():
+            self.style = BAR_STYLE_DEFAULTS.copy()
+            vars_['font_size'].set(self.style['font_size'])
+            vars_['opacity'].set(self.style['opacity'])
+            apply()
+
+        btns = ttk.Frame(pane)
+        btns.pack(fill='x', pady=(14, 0))
+        ttk.Button(btns, text='恢复默认', command=reset_default).pack(side='left')
+        ttk.Button(btns, text='完成', command=w.destroy).pack(side='right')
 
     # ------------------------------------------------------------ 快捷开关与倒计时动作
     def _toggle_awake(self):
@@ -384,36 +526,42 @@ class LauncherBar:
             self._refresh_recent_files(force=True)
             return
         if btn_widget and btn_widget.winfo_exists():
-            btn_widget.configure(text='✓ 已复制', bg=GREEN_ACTIVE)
+            btn_widget.configure(text='✓ 已复制', bg=GREEN_ACTIVE, fg='white')
             self.win.after(1200, lambda: (
-                btn_widget.configure(text='复制', bg='#334155') if btn_widget.winfo_exists() else None
+                btn_widget.configure(text='复制', bg=self._c('item_bg'), fg=self._c('fg'))
+                if btn_widget.winfo_exists() else None
             ))
 
     def _populate_files_box(self):
         if self.files_box is None or not self.files_box.winfo_exists():
             return
+        cbg = self._c('card_bg')
+        ibg = self._c('item_bg')
+        fg = self._c('fg')
+        mfg = self._c('muted_fg')
+        acc = self._c('accent')
         for child in self.files_box.winfo_children():
             child.destroy()
         if not self.fresh_files:
-            tk.Label(self.files_box, text='桌面与下载暂无近期新文件', bg=CARD_BG, fg=MUTED_FG,
-                     font=('Microsoft YaHei UI', 8), anchor='w').pack(fill='x', pady=2)
+            tk.Label(self.files_box, text='桌面与下载暂无近期新文件', bg=cbg, fg=mfg,
+                     font=self._f(-1), anchor='w').pack(fill='x', pady=2)
             return
         for item in self.fresh_files:
-            row = tk.Frame(self.files_box, bg=CARD_BG)
+            row = tk.Frame(self.files_box, bg=cbg)
             row.pack(fill='x', pady=1)
             disp = f"{item['icon']} [{item['source']}] {_clip(item['name'], 14)}"
             fb = tk.Button(
                 row, text=disp, command=lambda p=item['path']: self.open(p, record_recent=False),
-                bg=ITEM_BG, fg=TEXT_FG, activebackground=ACTIVE_BG, activeforeground='white',
-                font=('Microsoft YaHei UI', 9), relief='flat', anchor='w', padx=6, pady=4, cursor='hand2',
+                bg=ibg, fg=fg, activebackground=acc, activeforeground='white',
+                font=self._f(0), relief='flat', anchor='w', padx=6, pady=4, cursor='hand2',
             )
             fb.pack(side='left', fill='x', expand=True, padx=(0, 3))
             fb.bind('<Button-3>', lambda _e, p=item['path']: self._reveal_file(p))
 
             cp_btn = tk.Button(
-                row, text='复制', bg='#334155', fg=TEXT_FG,
+                row, text='复制', bg=ibg, fg=fg,
                 activebackground=GREEN_ACTIVE, activeforeground='white',
-                font=('Microsoft YaHei UI', 8), relief='flat', padx=6, pady=4, cursor='hand2',
+                font=self._f(-1), relief='flat', padx=6, pady=4, cursor='hand2',
             )
             cp_btn.configure(command=lambda p=item['path'], b=cp_btn: self._copy_file_item(p, b))
             cp_btn.pack(side='right')
@@ -592,9 +740,10 @@ class LauncherBar:
             self.last_inside = now
 
         if self.win.winfo_viewable():
+            editing_style = bool(self.style_dialog and self.style_dialog.winfo_exists())
             x, y = self.win.winfo_x(), self.win.winfo_y()
             inside = x <= p.x < x + self.win.winfo_width() and y <= p.y < y + self.win.winfo_height()
-            if inside:
+            if inside or editing_style:
                 self.last_inside = now
             if self._note_focused:
                 # 防止无边框窗口收不到 FocusOut 导致永远不隐藏：
@@ -607,7 +756,7 @@ class LauncherBar:
                     self._set_noactivate(True)
                 else:
                     self.last_inside = now
-            if not self.busy and (not enabled or blocked or now - self.last_inside > CLOSE_DELAY):
+            if not self.busy and not editing_style and (not enabled or blocked or now - self.last_inside > CLOSE_DELAY):
                 self._note_focused = False
                 self._set_noactivate(True)
                 self.win.withdraw()

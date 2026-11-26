@@ -231,8 +231,8 @@ class Widgets:
         self.hide_weather_tip()
         self.media.close()
         self.bar.close()
-        for win in (self.clock, self.theme_button.win, self.bar.win, self.monitor.win,
-                    self.media.win, self.media.lyrics.win, self.media.dialog,
+        for win in (self.clock, self.theme_button.win, self.bar.win, self.bar.style_dialog,
+                    self.monitor.win, self.media.win, self.media.lyrics.win, self.media.dialog,
                     self.countdown.win, self.countdown.dialog, self.settings_window, self.monitor.dialog):
             if win is not None:
                 try:
@@ -250,7 +250,7 @@ class Widgets:
                                          ('line', 'updated', 'place', 'source', 'station', 'point')
                                          if k in self.weather}
         self.cfg.update(groups=self.bar.groups, notes=self.bar.notes, deskkit_path=self.bar.deskkit_path,
-                        clock=self.clock_on.get(), bar=self.bar.enabled.get(),
+                        bar_style=self.bar.style, clock=self.clock_on.get(), bar=self.bar.enabled.get(),
                         appearance=self.style, adaptive=self.adaptive.get(), recent=self.bar.recent,
                         wallpaper_palettes=self.palettes, theme_btn=self.theme_button.config(),
                         media=self.media.config(), countdown=self.countdown.config())
