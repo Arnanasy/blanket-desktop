@@ -3,19 +3,7 @@ import tkinter as tk
 from tkinter import colorchooser, font as tkfont, ttk
 
 from lyrics_widget import LYRICS_LINE_OPTIONS, LYRICS_MODES
-
-
-def _usable_fonts():
-    skip_keywords = ('wingdings', 'webdings', 'marlett', 'mdl2', 'fluent icons', 'mt extra', '汉仪中黑')
-    skip_exact = {'symbol', 'ms outlook', 'ms reference specialty', 'bookshelf symbol 7'}
-    preferred = ['Microsoft YaHei UI', 'Segoe UI', 'Bahnschrift', 'SimHei', 'KaiTi', 'FangSong', 'Consolas', 'Arial']
-    all_f = sorted({
-        f for f in tkfont.families()
-        if f and not f.startswith('@')
-        and f.lower() not in skip_exact
-        and not any(k in f.lower() for k in skip_keywords)
-    })
-    return [f for f in preferred if f in all_f] + [f for f in all_f if f not in preferred]
+from ui_helpers import attach_hover_preview, usable_fonts
 
 
 def open_media_settings(widget, media_defaults, media_styles, sanitize_fn):
@@ -106,86 +94,20 @@ def open_media_settings(widget, media_defaults, media_styles, sanitize_fn):
         draw_lyrics_preview()
         widget.widgets.queue_save()
 
-    def attach_hover_preview(cb, key):
-        """下拉框鼠标滑过实时预览（90ms 防抖，仅刷新预览框，取消自动还原）。"""
-        state = {'last': None, 'committed': False, 'bound': False, 'timer': None}
-
-        def cancel_timer():
-            if state['timer'] is not None:
-                try:
-                    w.after_cancel(state['timer'])
-                except tk.TclError:
-                    pass
-                state['timer'] = None
-
-        def do_preview(val):
-            state['timer'] = None
-            if val == state['last'] or not w.winfo_exists():
-                return
-            state['last'] = val
+    def bind_lyrics_preview_combo(cb, key):
+        def on_prev(val):
             preview_overrides[key] = val
             draw_lyrics_preview()
 
-        def schedule_preview(val):
-            if val == state['last']:
-                return
-            cancel_timer()
-            state['timer'] = w.after(90, lambda v=val: do_preview(v))
+        def on_rest():
+            preview_overrides.pop(key, None)
+            draw_lyrics_preview()
 
-        def on_selected(_e=None):
-            cancel_timer()
-            state['committed'] = True
-            state['last'] = vars_[key].get()
+        def on_comm():
             preview_overrides.pop(key, None)
             apply()
 
-        cb.bind('<<ComboboxSelected>>', on_selected)
-
-        def bind_popdown():
-            cancel_timer()
-            state['last'] = widget.prefs.get(key)
-            state['committed'] = False
-
-            def attach():
-                if state['bound'] or not w.winfo_exists():
-                    return
-                try:
-                    pop = cb.tk.call('ttk::combobox::PopdownWindow', cb)
-                    lb_path = f'{pop}.f.l'
-                    if not cb.tk.call('winfo', 'exists', lb_path):
-                        return
-                except tk.TclError:
-                    return
-                state['bound'] = True
-
-                def on_motion_y(y_str):
-                    try:
-                        idx = int(cb.tk.call(lb_path, 'nearest', int(y_str)))
-                        size = int(cb.tk.call(lb_path, 'size'))
-                        if 0 <= idx < size:
-                            schedule_preview(str(cb.tk.call(lb_path, 'get', idx)))
-                    except (tk.TclError, ValueError):
-                        pass
-
-                def restore_if_uncommitted():
-                    if not state['committed'] and w.winfo_exists():
-                        preview_overrides.pop(key, None)
-                        state['last'] = None
-                        draw_lyrics_preview()
-
-                def on_unmap():
-                    cancel_timer()
-                    if w.winfo_exists():
-                        w.after(40, restore_if_uncommitted)
-
-                motion_cb = w.register(on_motion_y)
-                unmap_cb = w.register(on_unmap)
-                cb.tk.call('bind', lb_path, '<Motion>', f'+{motion_cb} %y')
-                cb.tk.call('bind', lb_path, '<Unmap>', f'+{unmap_cb}')
-
-            w.after(15, attach)
-
-        cb.configure(postcommand=bind_popdown)
+        attach_hover_preview(w, cb, lambda: widget.prefs.get(key), on_prev, on_rest, on_comm)
 
     def row(label):
         f = ttk.Frame(box)
@@ -239,16 +161,19 @@ def open_media_settings(widget, media_defaults, media_styles, sanitize_fn):
         command=apply,
     ).pack(side='left')
 
+    font_list = usable_fonts(
+        ('Microsoft YaHei UI', 'Segoe UI', 'Bahnschrift', 'SimHei', 'KaiTi', 'FangSong', 'Consolas', 'Arial')
+    )
     for key, label, values in (
         ('lyrics_mode', '歌词位置', list(LYRICS_MODES)),
         ('lyrics_lines', '歌词行数', list(LYRICS_LINE_OPTIONS)),
-        ('lyrics_font', '歌词字体', _usable_fonts()),
+        ('lyrics_font', '歌词字体', font_list),
     ):
         var = vars_[key] = tk.StringVar(value=widget.prefs[key])
         cbox = ttk.Combobox(row(label), textvariable=var, values=values, state='readonly', width=22)
         cbox.pack(side='left')
         if key in ('lyrics_lines', 'lyrics_font'):
-            attach_hover_preview(cbox, key)
+            bind_lyrics_preview_combo(cbox, key)
         else:
             cbox.bind('<<ComboboxSelected>>', apply)
 

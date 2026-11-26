@@ -274,6 +274,7 @@ class SystemMonitor:
         self.drag_offset = None
         self._click_through = False
         self.edge_start = None
+        self.edge_y = 0
         self.edge_monitor = None
         self.last_inside = 0.0
         self.last_sample = 0.0
@@ -507,36 +508,50 @@ class SystemMonitor:
     def tick(self, now, x, y, monitor, blocked, bar_enabled, suppress_edge=False, foreground=None, guard=False):
         l, t, r, b = monitor
         hide_blocked = blocked and not self.cfg['over_fullscreen']
-        # 游戏/窗口防误触开启时，不因鼠标甩到边缘而突然弹出监控框（若勾选“固定显示”则保留并转为鼠标穿透）
-        edge = not suppress_edge and not guard and not blocked and (
-            x < l + 3 if self.cfg['edge'] == '左' else x >= r - 3 and (not bar_enabled or y < (t + b) // 2)
-        )
+        scale = max(1.0, getattr(self.widgets, 'ui_scale', 1.0))
+        enter_px = max(6, round(6 * scale))
+        hold_px = max(18, round(18 * scale))
+        max_slide_y = round(48 * scale)
+
+        # 双阈值防回弹：6px 进边缘即触发计时，18px 内微小手抖回弹不断触；按住鼠标键或全屏时不误弹
+        dist = (x - l) if self.cfg['edge'] == '左' else (r - 1 - x)
+        half_ok = (self.cfg['edge'] == '左') or (not bar_enabled or y < (t + b) // 2)
+        threshold = hold_px if self.edge_start is not None else enter_px
+        edge = (not suppress_edge) and (not blocked) and half_ok and (dist <= threshold)
+
         if hide_blocked or not edge:
             self.edge_start = None
         elif self.edge_start is None or self.edge_monitor != monitor:
             self.edge_start = now
+            self.edge_y = y
             if not self.visible:
                 self.sample(now)
             self.edge_monitor = monitor
+        elif abs(y - self.edge_y) > max_slide_y:
+            # 沿边缘大幅度上下拉滚动条时重置计时，稳停再呼出
+            self.edge_start = now
+            self.edge_y = y
 
         if not self.visible and not hide_blocked and (
-            self.cfg['pinned'] or (self.edge_start is not None and now - self.edge_start >= 0.25)
+            self.cfg['pinned'] or (self.edge_start is not None and now - self.edge_start >= 0.16)
         ):
             self.show(x, y, now)
             self._last_foreground = foreground
 
         if self.visible:
             editing = bool(self.dialog and self.dialog.winfo_exists())
+            # 外部软件或半屏/全屏游戏在前台时开启鼠标穿透：既能贴边呼出看一眼温度，游戏右键走位也 100% 穿透不弹设置窗
             want_passthrough = bool((guard or blocked) and not editing)
             if want_passthrough != self._click_through:
                 self._click_through = want_passthrough
                 set_click_through(self.hwnd, want_passthrough)
 
             wx, wy = self.win.winfo_x(), self.win.winfo_y()
-            inside = (not want_passthrough) and (wx <= x < wx + self.win.winfo_width() and wy <= y < wy + self.win.winfo_height())
+            in_rect = wx <= x < wx + self.win.winfo_width() and wy <= y < wy + self.win.winfo_height()
+            inside = in_rect and (not blocked)
             if inside or edge or editing or self.drag_offset:
                 self.last_inside = now
-            if not editing and (hide_blocked or (not self.cfg['pinned'] and (guard or now - self.last_inside >= 1.5))):
+            if not editing and (hide_blocked or (not self.cfg['pinned'] and now - self.last_inside >= 1.5)):
                 if self.fade:
                     self.win.after_cancel(self.fade)
                     self.fade = None

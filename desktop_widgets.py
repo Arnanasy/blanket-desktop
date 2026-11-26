@@ -9,12 +9,12 @@ import re
 from threading import Thread
 import time
 import tkinter as tk
-from tkinter import colorchooser, ttk, font as tkfont
+from tkinter import colorchooser, ttk
 
 from clock_extras import (DATE_ADDON_OPTIONS, DATE_FORMAT_PRESETS, DEFAULT_DATE_FORMAT,
                           format_clock_text, format_date_text)
 from clock_face import ClockFace
-from desktop_windows import invalidate_cache
+from desktop_windows import find_desktop_windows, invalidate_cache
 from display_geometry import bounds
 from launcher_bar import LauncherBar
 from local_weather import refresh as refresh_weather, CACHE_SECONDS
@@ -23,16 +23,18 @@ from preferences import save_config
 from quick_hub import format_countdown
 from sys_monitor import SystemMonitor
 from theme_button import ThemeButton
+from ui_helpers import attach_hover_preview, usable_fonts
 from wallpaper_clock import sample
 from widget_layout import AnchorRegistry, capture_anchor, resolve_anchor
 from win32 import (user32, dwmapi, RECT, GetWindowLongPtr, class_name, cursor_pos, toplevel_hwnd,
-                   add_exstyle, set_click_through, is_own_window, place_on_desktop, GWL_STYLE, WS_CAPTION,
-                   DWMWA_EXTENDED_FRAME_BOUNDS, HWND_BOTTOM, SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE,
-                   SWP_NOZORDER, SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, SM_XVIRTUALSCREEN,
-                   SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN)
+                   add_exstyle, set_click_through, is_own_window, key_down, place_on_desktop,
+                   GWL_STYLE, WS_CAPTION, DWMWA_EXTENDED_FRAME_BOUNDS, HWND_BOTTOM,
+                   SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE,
+                   WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                   SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, VK_LBUTTON, VK_RBUTTON, VK_MBUTTON)
 
 KEY_COLOR = '#010203'          # 透明色键
-TICK_MS = 150
+TICK_MS = 60                   # 60ms 轻量调度，确保屏幕左右边缘呼出灵敏跟手
 THEME_CHECK_SECONDS = 30       # 系统强调色 / 深浅色的检查间隔
 SNAP = 18                      # 拖动时钟时吸附到边缘的距离
 SNAP_CENTER = 22               # 吸附到水平居中的距离
@@ -59,16 +61,18 @@ def resolve_on_desktop(foreground, fg_class, prev_on_desktop=False):
     return False
 
 
-def resolve_external_app_active(foreground, fg_class, own_window=False, prev_external=False):
-    """判断当前是否正在操作外部软件或半屏/全屏游戏（用于防误触锁定挂件与屏幕边缘呼出）。
+def resolve_external_app_active(foreground, fg_class, own_window=False, prev_external=False, cursor_on_desktop=False):
+    """判断当前是否正在操作外部软件或半屏/全屏游戏（用于防误触锁定桌面背景挂件）。
 
     - 前景为桌面或 Blanket 自身的设置窗口：返回 False（允许正常交互）；
-    - 前景为任务栏或短暂空句柄：沿用上一帧状态；
-    - 前景为任何外部程序/窗口化游戏：返回 True（启用防误触保护）。
+    - 前景为任务栏或关闭/最小化窗口后的空句柄：若鼠标正位于桌面区域则立即解锁返回 False，否则沿用上一帧；
+    - 前景为任何外部程序/窗口化游戏：返回 True（桌面挂件启用鼠标穿透保护）。
     """
     if own_window or fg_class in ('WorkerW', 'Progman'):
         return False
     if not foreground or fg_class in ('Shell_TrayWnd', 'Shell_SecondaryTrayWnd'):
+        if cursor_on_desktop:
+            return False
         return bool(prev_external)
     return True
 
@@ -477,104 +481,26 @@ class Widgets:
                      showvalue=True, length=340).pack(side='left', fill='x', expand=True)
 
         if self._font_choices is None:
-            # 排除 Windows 竖排专用字体（@ 开头）、纯图标/符号字体及已知异常字体
-            skip_keywords = ('wingdings', 'webdings', 'marlett', 'mdl2', 'fluent icons', 'mt extra', '汉仪中黑')
-            skip_exact = {'symbol', 'ms outlook', 'ms reference specialty', 'bookshelf symbol 7'}
+            self._font_choices = usable_fonts(
+                ('Bahnschrift', 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei UI', 'Consolas', 'Arial')
+            )
 
-            def is_usable_font(name):
-                if not name or name.startswith('@'):
-                    return False
-                low = name.lower()
-                if low in skip_exact or any(k in low for k in skip_keywords):
-                    return False
-                return True
-
-            all_families = sorted({f for f in tkfont.families() if is_usable_font(f)})
-            preferred = ['Bahnschrift', 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei UI', 'Consolas', 'Arial']
-            self._font_choices = [f for f in preferred if f in all_families] + [f for f in all_families if f not in preferred]
-
-        def attach_hover_preview(cb, key):
-            """下拉框鼠标滑过实时预览（仅刷新预览区，不引起桌面透明窗口黑框闪烁；带 90ms 防抖）。"""
-            state = {'last': None, 'committed': False, 'bound': False, 'timer': None}
-
-            def cancel_timer():
-                if state['timer'] is not None:
-                    try:
-                        w.after_cancel(state['timer'])
-                    except tk.TclError:
-                        pass
-                    state['timer'] = None
-
-            def apply_preview(val):
-                state['timer'] = None
-                if val == state['last'] or not w.winfo_exists():
-                    return
-                state['last'] = val
+        def bind_preview_combo(cb, key):
+            def on_prev(val):
                 self._preview_overrides[key] = val
                 if self.preview and self.preview.winfo_exists():
                     self.draw_clock(self.preview)
 
-            def schedule_preview(val):
-                if val == state['last']:
-                    return
-                cancel_timer()
-                state['timer'] = w.after(90, lambda v=val: apply_preview(v))
+            def on_rest():
+                self._preview_overrides.pop(key, None)
+                if self.preview and self.preview.winfo_exists():
+                    self.draw_clock(self.preview)
 
-            def on_selected(_e=None):
-                cancel_timer()
-                state['committed'] = True
-                state['last'] = variables[key].get()
+            def on_comm():
                 self._preview_overrides.pop(key, None)
                 apply()
 
-            cb.bind('<<ComboboxSelected>>', on_selected)
-
-            def bind_popdown():
-                cancel_timer()
-                state['last'] = self.style.get(key)
-                state['committed'] = False
-
-                def attach():
-                    if state['bound'] or not w.winfo_exists():
-                        return
-                    try:
-                        pop = cb.tk.call('ttk::combobox::PopdownWindow', cb)
-                        lb_path = f'{pop}.f.l'
-                        if not cb.tk.call('winfo', 'exists', lb_path):
-                            return
-                    except tk.TclError:
-                        return
-                    state['bound'] = True
-
-                    def on_motion_y(y_str):
-                        try:
-                            idx = int(cb.tk.call(lb_path, 'nearest', int(y_str)))
-                            size = int(cb.tk.call(lb_path, 'size'))
-                            if 0 <= idx < size:
-                                schedule_preview(str(cb.tk.call(lb_path, 'get', idx)))
-                        except (tk.TclError, ValueError):
-                            pass
-
-                    def restore_if_uncommitted():
-                        if not state['committed'] and w.winfo_exists():
-                            self._preview_overrides.pop(key, None)
-                            state['last'] = None
-                            if self.preview and self.preview.winfo_exists():
-                                self.draw_clock(self.preview)
-
-                    def on_unmap():
-                        cancel_timer()
-                        if w.winfo_exists():
-                            w.after(40, restore_if_uncommitted)
-
-                    motion_cb = w.register(on_motion_y)
-                    unmap_cb = w.register(on_unmap)
-                    cb.tk.call('bind', lb_path, '<Motion>', f'+{motion_cb} %y')
-                    cb.tk.call('bind', lb_path, '<Unmap>', f'+{unmap_cb}')
-
-                w.after(15, attach)
-
-            cb.configure(postcommand=bind_popdown)
+            attach_hover_preview(w, cb, lambda: self.style.get(key), on_prev, on_rest, on_comm)
 
         for key, label, values in [('font', '字体', self._font_choices),
                                    ('shape', '形状', ['透明', '矩形卡片', '圆角卡片', '圆形']),
@@ -583,12 +509,12 @@ class Widgets:
             var = variables[key] = tk.StringVar(value=self.style[key])
             cb = ttk.Combobox(row(label), textvariable=var, values=values, state='readonly', width=30)
             cb.pack(side='left')
-            attach_hover_preview(cb, key)
+            bind_preview_combo(cb, key)
 
         fmt_var = variables['date_format'] = tk.StringVar(value=self.style['date_format'])
         fmt_cb = ttk.Combobox(row('日期格式'), textvariable=fmt_var, values=list(DATE_FORMAT_PRESETS), width=30)
         fmt_cb.pack(side='left')
-        attach_hover_preview(fmt_cb, 'date_format')
+        bind_preview_combo(fmt_cb, 'date_format')
         fmt_cb.bind('<Return>', apply)
         fmt_cb.bind('<FocusOut>', apply)
         w.bind('<Destroy>', lambda _e: self._preview_overrides.clear(), add='+')
@@ -807,10 +733,21 @@ class Widgets:
         self.last_desktop_foreground = desktop_foreground
         on_desktop = resolve_on_desktop(foreground, name, self._was_on_desktop)
         own_win = False if on_desktop else is_own_window(foreground)
+        cursor_on_desk = False
+        if not foreground or name in ('Shell_TrayWnd', 'Shell_SecondaryTrayWnd'):
+            hit_hwnd = user32.WindowFromPoint(p)
+            shell_hwnd, lv_hwnd = find_desktop_windows()
+            cursor_on_desk = bool(
+                hit_hwnd and (hit_hwnd in (shell_hwnd, lv_hwnd) or class_name(hit_hwnd) in ('Progman', 'WorkerW'))
+            )
+            if cursor_on_desk:
+                on_desktop = True
         self._external_active = resolve_external_app_active(
             foreground, name, own_window=own_win, prev_external=self._external_active,
+            cursor_on_desktop=cursor_on_desk,
         )
         guard = self.guard_active
+        mouse_buttons_held = any(key_down(vk) for vk in (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON))
         restack = (on_desktop != self._was_on_desktop) or bool(user32.IsIconic(self.clock_hwnd))
         self._was_on_desktop = on_desktop
         blocked = self.fullscreen_active(foreground, name)
@@ -839,9 +776,13 @@ class Widgets:
 
         theme_edge = self.theme_button.tick(now, p, blocked, icons, guard=guard)
         monitor = bounds(p.x, p.y)
-        monitor_edge = self.monitor.tick(now, p.x, p.y, monitor, blocked, self.bar.enabled.get(),
-                                         suppress_edge=theme_edge, foreground=foreground, guard=guard)
+        monitor_edge = self.monitor.tick(
+            now, p.x, p.y, monitor, blocked, self.bar.enabled.get(),
+            suppress_edge=theme_edge or mouse_buttons_held, foreground=foreground, guard=guard,
+        )
         self.media.tick(now, blocked, icons, on_desktop=on_desktop, force_restack=restack, guard=guard)
-        bar_opened = self.bar.tick(now, p, monitor, blocked, monitor_edge, theme_edge, guard=guard)
+        bar_opened = self.bar.tick(
+            now, p, monitor, blocked, monitor_edge, theme_edge, mouse_held=mouse_buttons_held,
+        )
         if bar_opened:
             self.theme_button.raise_()

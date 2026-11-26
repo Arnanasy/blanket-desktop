@@ -16,6 +16,8 @@ from preferences import APP_DIR
 from quick_hub import (MAX_NOTES, MAX_NOTE_LEN, KeepAwake, launch_deskkit,
                        reveal_in_explorer, sanitize_notes, scan_recent_files,
                        turn_off_monitors)
+from win32 import (GetWindowLongPtr, SetWindowLongPtr, add_exstyle, toplevel_hwnd,
+                   GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
 
 BAR_BG = '#0F172A'
 CARD_BG = '#1E293B'
@@ -25,7 +27,7 @@ GREEN_ACTIVE = '#15803D'
 MUTED_FG = '#94A3B8'
 TEXT_FG = '#F1F5F9'
 
-OPEN_DELAY = 0.35          # 鼠标贴右边缘多久后弹出
+OPEN_DELAY = 0.18          # 鼠标贴右边缘多久后弹出（配合双阈值防回弹，轻靠即出）
 CLOSE_DELAY = 0.95         # 鼠标离开多久后收起
 RECENT_SCAN_TTL = 2.5      # 最新文件扫描最小间隔（秒）
 MAX_RECENT = 8
@@ -67,6 +69,7 @@ class LauncherBar:
 
         self.last_inside = time.monotonic()
         self.edge_since = None
+        self.edge_y = 0
         self.edge_monitor = None
         self.theme_item = None
         self.awake_btn = None
@@ -79,7 +82,18 @@ class LauncherBar:
         self.win.configure(bg=BAR_BG, highlightbackground='#334155', highlightthickness=1)
         self.win.attributes('-topmost', True)
         self.win.bind('<Escape>', lambda _e: self._dismiss())
+        self.hwnd = toplevel_hwnd(self.win)
+        # 默认不抢前台窗口焦点（点开关不打断游戏/软件）；点击便签输入框时才临时激活输入焦点
+        add_exstyle(self.hwnd, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
         self.render()
+
+    def _set_noactivate(self, noactivate):
+        if not self.hwnd:
+            return
+        cur = GetWindowLongPtr(self.hwnd, GWL_EXSTYLE)
+        target = (cur | WS_EX_NOACTIVATE) if noactivate else (cur & ~WS_EX_NOACTIVATE)
+        if target != cur:
+            SetWindowLongPtr(self.hwnd, GWL_EXSTYLE, target)
 
     def close(self):
         """程序退出时释放屏幕常亮状态。"""
@@ -87,6 +101,7 @@ class LauncherBar:
 
     def _dismiss(self):
         self._note_focused = False
+        self._set_noactivate(True)
         self.win.withdraw()
 
     # ------------------------------------------------------------ 视觉小组件构建
@@ -316,6 +331,7 @@ class LauncherBar:
     def _focus_note_entry(self, entry_widget):
         self._note_focused = True
         self.last_inside = time.monotonic()
+        self._set_noactivate(False)
         try:
             entry_widget.focus_force()
         except tk.TclError:
@@ -499,20 +515,40 @@ class LauncherBar:
             self.render()
 
     # ------------------------------------------------------------ 主循环
-    def tick(self, now, p, monitor, blocked, monitor_edge, theme_edge, guard=False):
-        """返回本轮是否刚弹出。"""
+    def tick(self, now, p, monitor, blocked, monitor_edge, theme_edge, mouse_held=False):
+        """返回本轮是否刚弹出（双阈值防回弹：6px 触发、18px 保持，按住鼠标键或拉滚动条时不误弹）。"""
         l, t, r, b = monitor
         enabled = self.enabled.get()
-        edge = enabled and p.x >= r - 3 and not blocked and not guard and not monitor_edge and not theme_edge
+        scale = max(1.0, getattr(self.widgets, 'ui_scale', 1.0))
+        enter_px = max(6, round(6 * scale))
+        hold_px = max(18, round(18 * scale))
+        max_slide_y = round(48 * scale)
+
+        dist = r - 1 - p.x
+        threshold = hold_px if self.edge_since is not None else enter_px
+        edge = (
+            enabled
+            and dist <= threshold
+            and not blocked
+            and not mouse_held
+            and not monitor_edge
+            and not theme_edge
+        )
         if not edge:
             self.edge_since = None
         elif self.edge_since is None or self.edge_monitor != monitor:
             self.edge_since = now
+            self.edge_y = p.y
             self.edge_monitor = monitor
+        elif abs(p.y - self.edge_y) > max_slide_y:
+            # 鼠标在右边缘快速上下拖动滚动条时重置计时，稳停后才呼出抽屉
+            self.edge_since = now
+            self.edge_y = p.y
 
         opened = False
         if edge and now - self.edge_since >= OPEN_DELAY:
             if not self.win.winfo_viewable():
+                self._set_noactivate(True)
                 self._refresh_recent_files()
                 self._reposition(p.x, p.y)
                 self.win.deiconify()
@@ -521,11 +557,12 @@ class LauncherBar:
 
         if self.win.winfo_viewable():
             x, y = self.win.winfo_x(), self.win.winfo_y()
-            if not guard and (x <= p.x < x + self.win.winfo_width() and y <= p.y < y + self.win.winfo_height()):
+            if x <= p.x < x + self.win.winfo_width() and y <= p.y < y + self.win.winfo_height():
                 self.last_inside = now
-            if self._note_focused and not guard:
+            if self._note_focused:
                 self.last_inside = now
-            if not self.busy and (not enabled or blocked or guard or now - self.last_inside > CLOSE_DELAY):
+            if not self.busy and (not enabled or blocked or now - self.last_inside > CLOSE_DELAY):
                 self._note_focused = False
+                self._set_noactivate(True)
                 self.win.withdraw()
         return opened

@@ -374,10 +374,11 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         # 回到桌面 -> 解除锁定，恢复全部交互
         self.assertFalse(dw.resolve_external_app_active(200, 'WorkerW', own_window=False, prev_external=True))
         self.assertFalse(dw.resolve_external_app_active(201, 'Progman', own_window=False, prev_external=True))
-        # 短暂点击任务栏或焦点过渡空句柄 -> 沿用上一帧状态
-        self.assertTrue(dw.resolve_external_app_active(100, 'Shell_TrayWnd', own_window=False, prev_external=True))
-        self.assertFalse(dw.resolve_external_app_active(100, 'Shell_TrayWnd', own_window=False, prev_external=False))
-        self.assertTrue(dw.resolve_external_app_active(0, '', own_window=False, prev_external=True))
+        # 短暂点击任务栏或焦点过渡空句柄 -> 鼠标不在桌面时沿用上一帧，鼠标已在桌面时立即解锁
+        self.assertTrue(dw.resolve_external_app_active(100, 'Shell_TrayWnd', own_window=False, prev_external=True, cursor_on_desktop=False))
+        self.assertFalse(dw.resolve_external_app_active(100, 'Shell_TrayWnd', own_window=False, prev_external=True, cursor_on_desktop=True))
+        self.assertFalse(dw.resolve_external_app_active(0, '', own_window=False, prev_external=True, cursor_on_desktop=True))
+        self.assertTrue(dw.resolve_external_app_active(0, '', own_window=False, prev_external=True, cursor_on_desktop=False))
 
         # 半屏游戏防误触开启时，失手点到窗外桌面空白不触发图标显隐切换
         dc = dwin.DesktopClick()
@@ -525,6 +526,13 @@ class TestClockExtrasAndLayout(unittest.TestCase):
             awake.release()
             self.assertFalse(awake.active)
             self.assertEqual(calls[-1], qh.ES_CONTINUOUS)
+
+        # 验证 ui_helpers 统一去重后的可用字体过滤
+        import ui_helpers as uh
+        fake_fams = ['@SimSun', 'Wingdings', 'Symbol', '汉仪中黑简', 'Segoe UI', 'Microsoft YaHei UI']
+        with mock.patch.object(uh.tkfont, 'families', return_value=fake_fams):
+            filtered = uh.usable_fonts(('Microsoft YaHei UI', 'Segoe UI'))
+            self.assertEqual(filtered, ['Microsoft YaHei UI', 'Segoe UI'])
 
 
 if __name__ == '__main__':

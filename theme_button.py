@@ -196,12 +196,13 @@ class ThemeButton:
                 return False
 
         t, r, b, x_hidden, _x_shown = self._edges()
-        in_y_zone = self.cur_y - 16 <= p.y <= self.cur_y + self.size + 16
+        in_y_zone = self.cur_y - 6 <= p.y <= self.cur_y + self.size + 6
         if self.expanded:
-            if self.cur_x - 14 <= p.x <= r + 4 and in_y_zone:
+            if self.cur_x - 10 <= p.x <= r + 4 and in_y_zone:
                 self.last_hover = now
             elif not self._dragging and now - self.last_hover > HOVER_LINGER:
                 self.expanded = False
                 self.target_x = x_hidden
                 self._start_anim()
-        return self.expanded or (r - 12 <= p.x < r and in_y_zone)
+        # 仅当鼠标正落在主题按钮自身窄区间内时才抑制右侧面板，避免阻断整个右边缘呼出
+        return (self.cur_y <= p.y <= self.cur_y + self.size) and (p.x >= (self.cur_x if self.expanded else r - 10))
