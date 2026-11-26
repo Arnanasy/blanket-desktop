@@ -11,7 +11,7 @@ class ClockFace:
         self.time_font = None
         self.date_font = None
 
-    def _measure(self, clock, date, weather, style, size, date_size, pad):
+    def _measure(self, clock, date, weather, countdown, style, size, date_size, pad):
         f = tkfont.Font(family=style['font'], size=size, weight='bold' if style['bold'] else 'normal')
         df = tkfont.Font(family=style['font'], size=date_size)
         tw, th = f.measure(clock), f.metrics('linespace')
@@ -19,16 +19,18 @@ class ClockFace:
         horizontal = style['layout'] == '左右排列'
         width = (tw + dw + pad if horizontal and dw else max(tw, dw)) + pad * 2
         height = (max(th, dh) if horizontal else th + dh) + pad * 2
-        weather_gap = max(6, round(df.metrics('linespace') * 0.28)) if weather else 0
-        extra = (df.metrics('linespace') + weather_gap) if weather else 0
-        width = max(width, df.measure(weather) + pad * 2)
+        line_gap = max(6, round(df.metrics('linespace') * 0.28))
+        extra_lines = [txt for txt in (weather, countdown) if txt]
+        extra = sum(df.metrics('linespace') + line_gap for _ in extra_lines)
+        for txt in extra_lines:
+            width = max(width, df.measure(txt) + pad * 2)
         height += extra
         content_height = height
         if style['shape'] == '圆形':
             width = height = math.ceil(math.hypot(width, height))
         return f, df, tw, th, dw, dh, extra, width, height, content_height
 
-    def draw(self, canvas, style, accent, palette, weather, max_size=None):
+    def draw(self, canvas, style, accent, palette, weather, max_size=None, countdown=''):
         canvas.delete('all')
         fg = accent if style['follow'] else style['color']
         clock = format_clock_text(seconds=bool(style.get('seconds', False)),
@@ -44,7 +46,7 @@ class ClockFace:
             max_w, max_h = max(80, int(max_size[0])), max(60, int(max_size[1]))
             for _ in range(4):
                 f, df, tw, th, dw, dh, extra, width, height, content_height = self._measure(
-                    clock, date, weather, style, size, date_size, pad,
+                    clock, date, weather, countdown, style, size, date_size, pad,
                 )
                 if width <= max_w and height <= max_h:
                     break
@@ -57,7 +59,7 @@ class ClockFace:
                 size, date_size, pad = new_size, new_date, new_pad
             else:
                 f, df, tw, th, dw, dh, extra, width, height, content_height = self._measure(
-                    clock, date, weather, style, size, date_size, pad,
+                    clock, date, weather, countdown, style, size, date_size, pad,
                 )
         else:
             key = (style['font'], size, style['bold'], date_size)
@@ -70,9 +72,11 @@ class ClockFace:
             dw, dh = (df.measure(date), df.metrics('linespace')) if style['date'] else (0, 0)
             width = (tw + dw + pad if horizontal and dw else max(tw, dw)) + pad * 2
             height = (max(th, dh) if horizontal else th + dh) + pad * 2
-            weather_gap = max(6, round(df.metrics('linespace') * 0.28)) if weather else 0
-            extra = (df.metrics('linespace') + weather_gap) if weather else 0
-            width = max(width, df.measure(weather) + pad * 2)
+            line_gap = max(6, round(df.metrics('linespace') * 0.28))
+            extra_lines = [txt for txt in (weather, countdown) if txt]
+            extra = sum(df.metrics('linespace') + line_gap for _ in extra_lines)
+            for txt in extra_lines:
+                width = max(width, df.measure(txt) + pad * 2)
             height += extra
             content_height = height
             if style['shape'] == '圆形':
@@ -116,14 +120,27 @@ class ClockFace:
             canvas.create_text(x, y, **options)
 
         if horizontal and dw:
+            base_top = (height - content_height) / 2 + pad
+            main_h = max(th, dh)
             total = tw + dw + pad
             x = (width - total) / 2
-            lettering(x, (height - extra) / 2, text=clock, font=f, fill=fg, anchor='w')
-            lettering(x + tw + pad, (height - extra) / 2, text=date, font=df, fill=fg, anchor='w')
+            lettering(x, base_top + main_h / 2, text=clock, font=f, fill=fg, anchor='w')
+            lettering(x + tw + pad, base_top + main_h / 2, text=date, font=df, fill=fg, anchor='w')
+            cur_y = base_top + main_h
         else:
             y = (height - extra - th - dh) / 2
             lettering(width / 2, y, text=clock, font=f, fill=fg, anchor='n')
             if dh:
                 lettering(width / 2, y + th, text=date, font=df, fill=fg, anchor='n')
+            cur_y = y + th + dh
+
+        line_gap = max(6, round(df.metrics('linespace') * 0.28))
+        line_h = df.metrics('linespace')
         if weather:
-            lettering(width / 2, (height + content_height) / 2 - pad, text=weather, font=df, fill=fg, anchor='s')
+            cur_y += line_gap
+            lettering(width / 2, cur_y, text=weather, font=df, fill=fg, anchor='n')
+            cur_y += line_h
+        if countdown:
+            cur_y += line_gap
+            cd_color = accent if not palette else fg
+            lettering(width / 2, cur_y, text=countdown, font=df, fill=cd_color, anchor='n')

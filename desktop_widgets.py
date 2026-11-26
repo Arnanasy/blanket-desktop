@@ -20,6 +20,7 @@ from launcher_bar import LauncherBar
 from local_weather import refresh as refresh_weather, CACHE_SECONDS
 from media_widget import MediaWidget
 from preferences import save_config
+from quick_hub import format_countdown
 from sys_monitor import SystemMonitor
 from theme_button import ThemeButton
 from wallpaper_clock import sample
@@ -108,7 +109,7 @@ class Widgets:
         self._last_alpha = None
         self._font_choices = None
 
-        # 天气
+        # 天气与倒计时
         self.weather_on = tk.BooleanVar(value=self.cfg.get('weather_enabled', True))
         cached = self.cfg.get('weather_cache')
         valid = isinstance(cached, dict) and isinstance(cached.get('line'), str) \
@@ -118,6 +119,9 @@ class Widgets:
         self.weather_job = None
         self.weather_due = 0
         self.weather_tip = None
+        self.timer_end = 0.0
+        self.timer_label = '专注'
+        self.timer_done_until = 0.0
 
         # 时钟窗口
         self.clock = tk.Toplevel(self.root)
@@ -205,10 +209,37 @@ class Widgets:
         enabled = bool(focus_var.get()) if focus_var is not None else True
         return enabled and self._external_active
 
+    def start_countdown(self, minutes, label='专注'):
+        mins = max(1, min(360, int(minutes)))
+        self.timer_label = (label or '专注').strip()[:10]
+        self.timer_end = time.monotonic() + mins * 60.0
+        self.timer_done_until = 0.0
+        self.last_clock = ''
+        self.redraw()
+        self.bar.refresh_countdown_ui()
+
+    def cancel_countdown(self):
+        self.timer_end = 0.0
+        self.timer_done_until = 0.0
+        self.last_clock = ''
+        self.redraw()
+        self.bar.refresh_countdown_ui()
+
+    def current_countdown_text(self, now=None):
+        now_t = time.monotonic() if now is None else now
+        if self.timer_end > 0:
+            rem = self.timer_end - now_t
+            if rem > 0:
+                return format_countdown(rem, self.timer_label)
+        if self.timer_done_until > now_t:
+            return f'🔔 {self.timer_label}时间到！'
+        return ''
+
     def hide_all(self):
         """退出时立即隐藏全部挂件和弹窗，做到点击即消失。"""
         self.hide_weather_tip()
         self.media.close()
+        self.bar.close()
         for win in (self.clock, self.theme_button.win, self.bar.win, self.monitor.win,
                     self.media.win, self.media.lyrics.win, self.media.dialog,
                     self.settings_window, self.monitor.dialog):
@@ -227,7 +258,8 @@ class Widgets:
             self.cfg['weather_cache'] = {k: self.weather[k] for k in
                                          ('line', 'updated', 'place', 'source', 'station', 'point')
                                          if k in self.weather}
-        self.cfg.update(groups=self.bar.groups, clock=self.clock_on.get(), bar=self.bar.enabled.get(),
+        self.cfg.update(groups=self.bar.groups, notes=self.bar.notes, deskkit_path=self.bar.deskkit_path,
+                        clock=self.clock_on.get(), bar=self.bar.enabled.get(),
                         appearance=self.style, adaptive=self.adaptive.get(), recent=self.bar.recent,
                         wallpaper_palettes=self.palettes, theme_btn=self.theme_button.config(),
                         media=self.media.config())
@@ -294,7 +326,9 @@ class Widgets:
                 pw = max(260, parent.winfo_width() - 16)
                 ph = max(110, parent.winfo_height() - 16)
                 max_size = (pw, ph)
-        self.face.draw(canvas or self.clock_label, style, self.accent, palette, weather, max_size=max_size)
+        cd_text = '' if is_preview else self.current_countdown_text()
+        self.face.draw(canvas or self.clock_label, style, self.accent, palette, weather,
+                       max_size=max_size, countdown=cd_text)
         if canvas is None:
             alpha = style['opacity'] / 100
             if alpha != self._last_alpha:
@@ -743,13 +777,27 @@ class Widgets:
         if now - self.last_theme > THEME_CHECK_SECONDS:
             self.theme()
             self.last_theme = now
+        if self.timer_end > 0 and now >= self.timer_end:
+            finished_label = self.timer_label or '倒计时'
+            self.timer_end = 0.0
+            self.timer_done_until = now + 8.0
+            try:
+                self.app.tray.notify('Blanket 倒计时结束', f'设定的「{finished_label}」时间已到！')
+            except Exception:
+                pass
+            self.bar.refresh_countdown_ui()
+
+        cd_text = self.current_countdown_text(now)
         text = (
             format_clock_text(seconds=bool(self.style['seconds']), hour12=bool(self.style['hour12']))
             + '|' + format_date_text(fmt=self.style['date_format'], addon=self.style['date_addon'])
+            + '|' + cd_text
         )
         if text != self.last_clock:
             self.redraw()
             self.last_clock = text
+            if self.timer_end > 0 and cd_text:
+                self.bar.refresh_countdown_ui(cd_text)
 
         foreground = user32.GetForegroundWindow()
         name = class_name(foreground)

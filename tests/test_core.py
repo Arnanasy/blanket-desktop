@@ -450,6 +450,82 @@ class TestClockExtrasAndLayout(unittest.TestCase):
             ne.assert_not_called()
             lr.assert_not_called()
 
+    def test_quick_hub_recent_files_notes_countdown_awake_and_deskkit(self):
+        import quick_hub as qh
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            dl_dir = base / '下载测试目录'
+            desk_dir = base / '桌面测试目录'
+            dl_dir.mkdir()
+            desk_dir.mkdir()
+
+            # 应被过滤的噪音文件：快捷方式、未下完临时文件、Office 锁文件、系统配置
+            (desk_dir / '快捷方式.lnk').write_bytes(b'1')
+            (dl_dir / '未下完视频.mp4.crdownload').write_bytes(b'1')
+            (desk_dir / '~$正在编辑的合同.docx').write_bytes(b'1')
+            (desk_dir / 'desktop.ini').write_text('x', encoding='utf-8')
+
+            # 正常新文件（中文命名）
+            f1 = dl_dir / '报销发票.pdf'
+            f2 = desk_dir / '屏幕截图_01.png'
+            f1.write_bytes(b'pdf')
+            f2.write_bytes(b'png')
+            os.utime(f1, (1000, 1000))
+            os.utime(f2, (2000, 2000))
+
+            items = qh.scan_recent_files(limit=5, dir_pairs=[('下载', dl_dir), ('桌面', desk_dir)])
+            self.assertEqual([x['name'] for x in items], ['屏幕截图_01.png', '报销发票.pdf'])
+            self.assertEqual([x['source'] for x in items], ['桌面', '下载'])
+            self.assertEqual(items[0]['icon'], '🖼️')
+            self.assertEqual(items[1]['icon'], '📕')
+
+            # 空目录边界
+            empty_dir = base / '空文件夹'
+            empty_dir.mkdir()
+            self.assertEqual(qh.scan_recent_files(limit=5, dir_pairs=[('桌面', empty_dir)]), [])
+
+            # 同级目录下自动探测 DeskKit（无需硬编码路径）
+            app_dir = base / '白'
+            dk_dir = base / '本地工具箱'
+            app_dir.mkdir()
+            dk_dir.mkdir()
+            dk_cmd = dk_dir / 'DeskKit.cmd'
+            dk_cmd.write_text('@echo off\n', encoding='utf-8')
+            found = qh.find_deskkit_entry('', str(app_dir))
+            self.assertEqual(found, dk_cmd)
+
+        # 随手便签清洗与条数/长度边界
+        notes = qh.sanitize_notes([
+            '  取快递 5-2-108  ',
+            {'text': '下午三点开会', 'done': 1},
+            {'text': '   '},
+            None,
+            123,
+        ])
+        self.assertEqual(notes, [
+            {'text': '取快递 5-2-108', 'done': False},
+            {'text': '下午三点开会', 'done': True},
+        ])
+        self.assertEqual(qh.sanitize_notes('bad_type'), [])
+
+        # 倒计时文本格式化边界
+        self.assertEqual(qh.format_countdown(0, '专注'), '')
+        self.assertEqual(qh.format_countdown(-5, '专注'), '')
+        self.assertEqual(qh.format_countdown(1499.2, '专注'), '⏳ 专注 25:00')
+        self.assertEqual(qh.format_countdown(65, '泡面'), '⏳ 泡面 01:05')
+        self.assertEqual(qh.format_countdown(3661, '学习'), '⏳ 学习 1:01:01')
+
+        # 屏幕常亮状态机与退出释放
+        calls = []
+        with mock.patch.object(qh.kernel32, 'SetThreadExecutionState', side_effect=lambda f: calls.append(f) or 1):
+            awake = qh.KeepAwake()
+            self.assertTrue(awake.toggle())
+            self.assertEqual(calls[-1], qh.ES_CONTINUOUS | qh.ES_SYSTEM_REQUIRED | qh.ES_DISPLAY_REQUIRED)
+            awake.release()
+            self.assertFalse(awake.active)
+            self.assertEqual(calls[-1], qh.ES_CONTINUOUS)
+
 
 if __name__ == '__main__':
     unittest.main()

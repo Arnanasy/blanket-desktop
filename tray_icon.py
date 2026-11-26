@@ -6,10 +6,11 @@ import queue
 from win32 import (user32, gdi32, shell32, NOTIFYICONDATAW, ICONINFO, WNDPROC, SetWindowLongPtr,
                    GWLP_WNDPROC, WM_NULL, WM_APP, WM_LBUTTONUP, WM_RBUTTONUP, WM_DISPLAYCHANGE,
                    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WM_HOTKEY, PBT_APMRESUMESUSPEND,
-                   PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK, NIM_ADD, NIM_DELETE, NIF_MESSAGE,
-                   NIF_ICON, NIF_TIP, TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, MF_STRING,
-                   MF_CHECKED, MF_SEPARATOR, IMAGE_ICON, LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON,
-                   SM_CYSMICON, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_H, VK_T, cursor_pos)
+                   PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK, NIM_ADD, NIM_MODIFY, NIM_DELETE,
+                   NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO, NIIF_INFO, TPM_RIGHTBUTTON,
+                   TPM_NONOTIFY, TPM_RETURNCMD, MF_STRING, MF_CHECKED, MF_SEPARATOR, IMAGE_ICON,
+                   LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON, SM_CYSMICON, MOD_ALT, MOD_CONTROL,
+                   MOD_NOREPEAT, VK_H, VK_T, cursor_pos)
 
 WM_TRAY = WM_APP + 1
 IDM_OPEN = 2001
@@ -108,6 +109,17 @@ class TrayIcon:
         nid.hIcon = self._icon
         nid.szTip = 'Blanket（左键切换，右键菜单）'
         shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+
+    def notify(self, title, message):
+        """发送非抢焦点的系统托盘轻提示通知（如倒计时结束提醒）。"""
+        if self._proc_ref is None:
+            return
+        nid = self._base_data()
+        nid.uFlags = NIF_INFO
+        nid.szInfoTitle = str(title or 'Blanket')[:60]
+        nid.szInfo = str(message or '')[:240]
+        nid.dwInfoFlags = NIIF_INFO
+        shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
 
     def _show_menu(self):
         if self._proc_ref is None:    # 已销毁
