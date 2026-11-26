@@ -99,93 +99,104 @@ class App:
         f_small = ('Microsoft YaHei UI', 8)
 
         self.subtext_labels = set()
-        tk.Label(root, text='Blanket', font=f_title, bg=BG, fg=TEXT).pack(pady=(18, 2))
-        sub_label = tk.Label(root, text='鼠标移到屏幕边缘自动显示，移开只剩壁纸',
-                             font=f_sub, bg=BG, fg=SUBTEXT)
-        sub_label.pack(pady=(0, 12))
-        self.subtext_labels.add(sub_label)
+        self.neutral_buttons = set()
+
+        # 顶部极简标题栏：左侧品牌名 + 右侧日夜主题切换小按钮
+        header = tk.Frame(root, bg=BG)
+        header.pack(fill='x', padx=22, pady=(16, 10))
+        tk.Label(header, text='Blanket', font=f_title, bg=BG, fg=TEXT).pack(side='left')
+        self.theme_button = tk.Button(
+            header, text='☾', command=self.toggle_theme, font=('Segoe UI Symbol', 11),
+            bg='#E2E8F0', fg=TEXT, activebackground='#CBD5E1',
+            relief='flat', borderwidth=0, cursor='hand2', width=3, pady=2,
+        )
+        self.theme_button.pack(side='right')
+        self.neutral_buttons.add(self.theme_button)
 
         # 主切换按钮
         self.btn = tk.Button(root, text='立即隐藏', font=f_btn,
                              bg=BLUE, fg=WHITE, activebackground=BLUE_D,
                              activeforeground=WHITE, relief='flat',
                              borderwidth=0, cursor='hand2',
-                             width=20, pady=10, command=self.manual_toggle)
-        self.btn.pack(padx=24)
+                             width=18, pady=9, command=self.manual_toggle)
+        self.btn.pack(fill='x', padx=22)
 
         # 状态行
         state_frame = tk.Frame(root, bg=BG)
-        state_frame.pack(pady=(12, 4))
-        self.dot_canvas = tk.Canvas(state_frame, width=14, height=14, bg=BG, highlightthickness=0)
-        self.dot_canvas.pack(side='left', padx=(0, 8))
-        self.dot = self.dot_canvas.create_oval(1, 1, 13, 13, fill=GREEN, outline=GREEN)
+        state_frame.pack(pady=(9, 4))
+        self.dot_canvas = tk.Canvas(state_frame, width=12, height=12, bg=BG, highlightthickness=0)
+        self.dot_canvas.pack(side='left', padx=(0, 6))
+        self.dot = self.dot_canvas.create_oval(1, 1, 11, 11, fill=GREEN, outline=GREEN)
         self.state_label = tk.Label(state_frame, text='桌面图标显示中', font=f_state, bg=BG, fg=TEXT)
         self.state_label.pack(side='left')
 
-        # 设置区
+        # 精简设置区
         opt = tk.Frame(root, bg=BG)
-        opt.pack(fill='x', padx=24, pady=(10, 2))
+        opt.pack(fill='x', padx=22, pady=(6, 2))
 
         def check(text, variable, command, **pack):
             tk.Checkbutton(opt, text=text, variable=variable, font=f_normal, bg=BG, fg=TEXT,
                            activebackground=BG, selectcolor=WHITE, anchor='w',
                            command=command).pack(anchor='w', **pack)
 
-        def caption(text):
-            tk.Label(opt, text=text, font=f_normal, bg=BG, fg=TEXT, anchor='w').pack(anchor='w', pady=(8, 0))
-
-        self.auto_var = tk.BooleanVar(value=bool(self.cfg['auto']))
-        check('自动模式（鼠标热区驱动）', self.auto_var, self._persist)
-
         self.focus_guard_var = tk.BooleanVar(value=bool(self.cfg.get('focus_guard', True)))
-        check('游戏 / 窗口防误触（半屏游戏或操作软件时锁定挂件与边缘）',
-              self.focus_guard_var, self._persist, pady=(6, 0))
+        check('游戏 / 窗口防误触', self.focus_guard_var, self._persist)
 
         repair_autostart()     # 程序文件夹移动过或存在旧注册表名时，自动迁移修正
         self.startup_var = tk.BooleanVar(value=autostart_enabled())
-        check('开机自启（登录后自动运行）', self.startup_var, self._toggle_autostart, pady=(6, 0))
+        check('开机自启', self.startup_var, self._toggle_autostart, pady=(4, 0))
 
-        caption('热区位置：')
+        self.auto_var = tk.BooleanVar(value=bool(self.cfg['auto']))
+        check('鼠标移到边缘自动隐藏', self.auto_var, self._on_auto_changed, pady=(4, 0))
+
+        # 仅在勾选「自动隐藏」时展开的紧凑两行细项（未勾选时自动收起，保持主窗口极致清爽）
+        self.auto_detail_frame = tk.Frame(opt, bg=BG)
         self.zone_var = tk.StringVar(value=self.cfg['zone'])
-        for text, val in [('顶部边缘', 'top'), ('屏幕任意边缘', 'any'), ('左上角', 'corner')]:
-            tk.Radiobutton(opt, text=text, variable=self.zone_var, value=val,
-                           font=f_normal, bg=BG, fg=TEXT, activebackground=BG,
-                           selectcolor=WHITE, anchor='w', command=self._persist).pack(anchor='w')
+        zone_row = tk.Frame(self.auto_detail_frame, bg=BG)
+        zone_row.pack(fill='x', pady=(4, 2))
+        tk.Label(zone_row, text='热区：', font=f_small, bg=BG, fg=SUBTEXT).pack(side='left')
+        for text, val in [('顶部', 'top'), ('任意边', 'any'), ('左上角', 'corner')]:
+            tk.Radiobutton(zone_row, text=text, variable=self.zone_var, value=val,
+                           font=f_small, bg=BG, fg=TEXT, activebackground=BG,
+                           selectcolor=WHITE, command=self._persist).pack(side='left', padx=(0, 4))
 
-        caption('无操作后自动隐藏：')
-        delay_row = tk.Frame(opt, bg=BG)
-        delay_row.pack(anchor='w')
         self.delay_var = tk.StringVar(value=str(self.cfg['delay']))
+        delay_row = tk.Frame(self.auto_detail_frame, bg=BG)
+        delay_row.pack(fill='x', pady=(0, 2))
+        tk.Label(delay_row, text='延时：', font=f_small, bg=BG, fg=SUBTEXT).pack(side='left')
         for text, val in [('5秒', '5'), ('10秒', '10'), ('20秒', '20')]:
             tk.Radiobutton(delay_row, text=text, variable=self.delay_var, value=val,
-                           font=f_normal, bg=BG, fg=TEXT, activebackground=BG,
-                           selectcolor=WHITE, command=self._persist).pack(side='left')
+                           font=f_small, bg=BG, fg=TEXT, activebackground=BG,
+                           selectcolor=WHITE, command=self._persist).pack(side='left', padx=(0, 6))
 
-        hint_label = tk.Label(root, text='Ctrl+Alt+H 切换图标 · Ctrl+Alt+T 切换主题',
-                              font=f_small, bg=BG, fg=SUBTEXT)
-        hint_label.pack(pady=(10, 2))
-        self.subtext_labels.add(hint_label)
+        if self.auto_var.get():
+            self.auto_detail_frame.pack(fill='x', padx=(16, 0), pady=(2, 2))
 
+        # 底部一行三按钮
         actions = tk.Frame(root, bg=BG)
-        actions.pack(fill='x', padx=24, pady=(6, 12))
-        actions.columnconfigure((0, 1), weight=1, uniform='action')
-        self.neutral_buttons = set()
+        actions.pack(fill='x', padx=22, pady=(10, 4))
+        actions.columnconfigure((0, 1, 2), weight=1, uniform='action')
 
-        def action(label, command, row, column, danger=False, columnspan=1):
+        def action(label, command, column, danger=False):
             button = tk.Button(actions, text=label, command=command, font=f_normal,
                                bg=RED if danger else '#E2E8F0', fg=WHITE if danger else TEXT,
                                activebackground=RED_D if danger else '#CBD5E1',
                                relief='flat', borderwidth=0, cursor='hand2', pady=7)
             if not danger:
                 self.neutral_buttons.add(button)
-            button.grid(row=row, column=column, columnspan=columnspan, sticky='ew', padx=3, pady=3)
+            button.grid(row=0, column=column, sticky='ew', padx=3)
             return button
 
-        action('桌面组件设置', lambda: self.widgets.settings(), 0, 0)
-        self.pause_button = action('暂停自动隐藏', self.pause_auto, 0, 1)
-        action('隐藏窗口', self.hide_window, 1, 0)
-        action('退出程序', self.quit_app, 1, 1, danger=True)
-        self.theme_button = action('', self.toggle_theme, 2, 0, columnspan=2)
+        action('组件设置', lambda: self.widgets.settings(), 0)
+        action('藏到托盘', self.hide_window, 1)
+        action('退出', self.quit_app, 2, danger=True)
+
+        hint_label = tk.Label(root, text='Ctrl+Alt+H 切图标 · Ctrl+Alt+T 切主题',
+                              font=f_small, bg=BG, fg=SUBTEXT)
+        hint_label.pack(pady=(4, 12))
+        self.subtext_labels.add(hint_label)
+
+        self.pause_button = None
         self._update_theme_label(_system_dark())
         self._paused = False
 
@@ -276,13 +287,25 @@ class App:
         self._last_activity = time.monotonic()
         self.refresh_ui()
 
+    def _on_auto_changed(self):
+        if self.auto_var.get():
+            self.auto_detail_frame.pack(fill='x', padx=(16, 0), pady=(2, 2))
+        else:
+            self.auto_detail_frame.pack_forget()
+        self.root.update_idletasks()
+        w = max(self.root.winfo_reqwidth(), round(300 * self.root.winfo_fpixels('1i') / 96))
+        h = min(self.root.winfo_reqheight() + 8, self.root.winfo_screenheight() - 40)
+        self.root.geometry(f'{w}x{h}')
+        self._persist()
+
     def pause_auto(self):
         self._paused = not self._paused
-        self.pause_button.config(text='恢复自动隐藏' if self._paused else '暂停自动隐藏')
+        if self.pause_button is not None:
+            self.pause_button.config(text='恢复自动隐藏' if self._paused else '暂停自动隐藏')
         self._last_activity = time.monotonic()
 
     def _update_theme_label(self, dark):
-        self.theme_button.config(text='☀ 切换为浅色主题' if dark else '☾ 切换为深色主题')
+        self.theme_button.config(text='☀' if dark else '☾')
 
     def sync_theme(self, dark):
         """当外部或程序内切换了系统深浅色时，同步更新主窗口配色与按钮文字。"""
@@ -574,10 +597,10 @@ def main():
         app.recovery_guard = guard
 
         root.update_idletasks()
-        w = max(root.winfo_reqwidth(), round(340 * root.winfo_fpixels('1i') / 96))
+        w = max(root.winfo_reqwidth(), round(300 * root.winfo_fpixels('1i') / 96))
         # 高度随内容自适应，确保所有选项都完整可见
         screen_h = root.winfo_screenheight()
-        h = min(root.winfo_reqheight() + 24, screen_h - 40)
+        h = min(root.winfo_reqheight() + 8, screen_h - 40)
         x = (root.winfo_screenwidth() - w) // 2
         y = (screen_h - h) // 4
         root.geometry(f'{w}x{h}+{x}+{y}')
