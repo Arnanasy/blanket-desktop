@@ -493,10 +493,12 @@ class App:
             if entered:
                 self._ensure_shown()
             elif not in_zone and icons_visible():
-                # 图标显示中：仅当鼠标静止、无操作超过设定时间才隐藏
-                idle = min(time.monotonic() - self._last_activity, input_idle_seconds())
+                # 图标显示中：仅当鼠标静止、无操作超过设定时间才隐藏（按住鼠标拖拽图标期间持续刷新活动时间）
                 if any(key_down(key) for key in (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON)):
+                    self._last_activity = time.monotonic()
                     idle = 0
+                else:
+                    idle = min(time.monotonic() - self._last_activity, input_idle_seconds())
                 if idle >= int(self.delay_var.get()):
                     set_icons_visible(False)
 

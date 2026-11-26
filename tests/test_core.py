@@ -423,16 +423,32 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         dc = dwin.DesktopClick()
         with mock.patch.object(dwin, 'key_down', side_effect=[True, False]), \
              mock.patch.object(dwin, 'get_cursor', return_value=(100, 100)), \
-             mock.patch.object(dc, 'is_blank_click', return_value=True):
+             mock.patch.object(dc, '_is_desktop_hwnd', return_value=True), \
+             mock.patch.object(dc, 'is_blank_click', return_value=True) as blank_fn:
             self.assertFalse(dc.check(suppress=True))
             self.assertFalse(dc.check(suppress=True))
+            blank_fn.assert_not_called()
 
-        # 已在桌面（suppress=False）时单击桌面空白正常切换图标
+        # 按下鼠标并拖动桌面图标（位移 > 6px）：从按下到松手全程严禁调用 is_blank_click（零跨进程插队！）
+        with mock.patch.object(dwin, 'key_down', side_effect=[True, True, False]), \
+             mock.patch.object(dwin, 'get_cursor', side_effect=[(100, 100), (140, 120), (220, 180)]), \
+             mock.patch.object(dc, '_is_desktop_hwnd', return_value=True), \
+             mock.patch.object(dc, 'is_blank_click', return_value=True) as blank_drag:
+            self.assertFalse(dc.check(suppress=False))  # 按下瞬间：零查询
+            blank_drag.assert_not_called()
+            self.assertFalse(dc.check(suppress=False))  # 拖拽中途：零查询
+            self.assertFalse(dc.check(suppress=False))  # 拖完松手：因位移 > 6px 仍零查询
+            blank_drag.assert_not_called()
+
+        # 已在桌面（suppress=False）且为短促原地单击：按下时不查，松手后才查一次 is_blank_click
         with mock.patch.object(dwin, 'key_down', side_effect=[True, False]), \
              mock.patch.object(dwin, 'get_cursor', return_value=(100, 100)), \
-             mock.patch.object(dc, 'is_blank_click', return_value=True):
+             mock.patch.object(dc, '_is_desktop_hwnd', return_value=True), \
+             mock.patch.object(dc, 'is_blank_click', return_value=True) as blank_click:
             self.assertFalse(dc.check(suppress=False))
+            blank_click.assert_not_called()             # 按下瞬间绝不调用 AccessibleObjectFromPoint！
             self.assertTrue(dc.check(suppress=False))
+            blank_click.assert_called_once_with(100, 100)
 
         # 验证 set_click_through 仅切换 WS_EX_TRANSPARENT 且保留原有扩展样式
         base_style = win32.WS_EX_NOACTIVATE | win32.WS_EX_TOOLWINDOW

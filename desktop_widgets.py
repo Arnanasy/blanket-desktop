@@ -14,7 +14,7 @@ from tkinter import colorchooser, ttk
 from clock_extras import (DATE_ADDON_OPTIONS, DATE_FORMAT_PRESETS, DEFAULT_DATE_FORMAT,
                           format_clock_text, format_date_text)
 from clock_face import ClockFace
-from desktop_windows import find_desktop_windows, invalidate_cache
+from desktop_windows import find_desktop_windows
 from display_geometry import bounds
 from launcher_bar import LauncherBar
 from local_weather import refresh as refresh_weather, CACHE_SECONDS
@@ -162,7 +162,6 @@ class Widgets:
         self.anchors.register(self.media.relayout)
         self.last_theme = 0
         self.last_clock = ''
-        self.last_desktop_foreground = None
         self._was_on_desktop = False
         self._external_active = False
         self._clock_passthrough = False
@@ -727,10 +726,6 @@ class Widgets:
 
         foreground = user32.GetForegroundWindow()
         name = class_name(foreground)
-        desktop_foreground = foreground if name in ('WorkerW', 'Progman') else None
-        if desktop_foreground and desktop_foreground != self.last_desktop_foreground:
-            invalidate_cache()       # 桌面窗口可能被重建，重新查找
-        self.last_desktop_foreground = desktop_foreground
         on_desktop = resolve_on_desktop(foreground, name, self._was_on_desktop)
         own_win = False if on_desktop else is_own_window(foreground)
         cursor_on_desk = False
@@ -748,15 +743,19 @@ class Widgets:
         )
         guard = self.guard_active
         mouse_buttons_held = any(key_down(vk) for vk in (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON))
-        restack = (on_desktop != self._was_on_desktop) or bool(user32.IsIconic(self.clock_hwnd))
-        self._was_on_desktop = on_desktop
+        # 按住鼠标拖拽桌面图标或框选期间，冻结挂件层级重排（restack），避免惊动 Explorer / Wallpaper Engine 拖拽会话
+        restack = (not mouse_buttons_held) and ((on_desktop != self._was_on_desktop) or bool(user32.IsIconic(self.clock_hwnd)))
+        if not mouse_buttons_held:
+            self._was_on_desktop = on_desktop
         blocked = self.fullscreen_active(foreground, name)
         icons = self.app.desktop_icons_visible()
+        # 桌面图标显示期间同样强制挂件保持鼠标穿透兜底，杜绝透明边框遮挡桌面图标拖拽
+        passthrough = bool(guard or icons is not False)
 
-        if guard != self._clock_passthrough:
-            self._clock_passthrough = guard
-            set_click_through(self.clock_hwnd, guard)
-            if guard:
+        if passthrough != self._clock_passthrough:
+            self._clock_passthrough = passthrough
+            set_click_through(self.clock_hwnd, passthrough)
+            if passthrough:
                 self.hide_weather_tip()
 
         # 时钟：仅在图标隐藏、且没有全屏程序时显示；退回桌面或 Win+D 时自动拉回桌面之上
@@ -764,11 +763,11 @@ class Widgets:
         if self.clock_on.get() and icons is False and not blocked:
             if not visible:
                 self._show_clock(on_desktop=on_desktop)
-                set_click_through(self.clock_hwnd, guard)
+                set_click_through(self.clock_hwnd, passthrough)
             elif restack and self.offset is None:
                 place_on_desktop(self.clock_hwnd, on_desktop=on_desktop, show=True)
-            elif self.offset is None and now - self.last_position_check > 1:
-                # 显示器布局变化后把时钟拉回可见区域；拖动中不干预
+            elif self.offset is None and not mouse_buttons_held and now - self.last_position_check > 1:
+                # 显示器布局变化后把时钟拉回可见区域；拖动或按住鼠标期间绝不干预
                 self.place_clock(self.clock.winfo_x(), self.clock.winfo_y())
                 self.last_position_check = now
         elif visible:
@@ -780,9 +779,9 @@ class Widgets:
             now, p.x, p.y, monitor, blocked, self.bar.enabled.get(),
             suppress_edge=theme_edge or mouse_buttons_held, foreground=foreground, guard=guard,
         )
-        self.media.tick(now, blocked, icons, on_desktop=on_desktop, force_restack=restack, guard=guard)
+        self.media.tick(now, blocked, icons, on_desktop=on_desktop, force_restack=restack, guard=passthrough)
         bar_opened = self.bar.tick(
             now, p, monitor, blocked, monitor_edge, theme_edge, mouse_held=mouse_buttons_held,
         )
-        if bar_opened:
+        if bar_opened and not mouse_buttons_held:
             self.theme_button.raise_()

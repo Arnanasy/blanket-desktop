@@ -1,5 +1,6 @@
 """桌面图标窗口的查找、显示/隐藏，以及“点在桌面空白处”的判定。"""
 import ctypes
+import time
 
 from display_geometry import bounds
 from win32 import (user32, kernel32, ole32, oleaut32, oleacc, LASTINPUTINFO, POINT, VARIANT,
@@ -153,37 +154,52 @@ def _accessible_list_background(point):
 
 
 class DesktopClick:
-    """基于轻量化左键轮询的桌面空白点击检测（不挂全局鼠标钩子，零鼠标延迟）。"""
+    """基于轻量化左键轮询的桌面空白点击检测（按下与拖拽全程零跨进程查询，绝不打断桌面图标拖拽）。"""
 
-    DRAG_THRESHOLD = 6   # 按下到松开位移超过此值视为框选，不触发
+    DRAG_THRESHOLD = 6       # 按下到松开位移超过此值视为拖拽图标或框选，绝不触发
+    MAX_CLICK_SECONDS = 0.45 # 长按超过此时间视为拖拽预备或长按操作，不触发切换
 
     def __init__(self, on_unavailable=None):
         self.on_unavailable = on_unavailable
         self._held = False
-        self._down_blank = False
+        self._down_on_desktop = False
         self._down_x = self._down_y = 0
+        self._down_at = 0.0
         self._warned = False
 
     def reset(self):
         self._held = key_down(VK_LBUTTON)
-        self._down_blank = False
+        self._down_on_desktop = False
+
+    def _is_desktop_hwnd(self, x, y):
+        """纯内核句柄比对（零 WM_GETOBJECT / 零跨进程消息，绝不干扰 Explorer DragDetect）。"""
+        hwnd = user32.WindowFromPoint(POINT(x, y))
+        if not hwnd:
+            return False
+        shell, lv = find_desktop_windows()
+        return hwnd == shell or hwnd == lv
 
     def check(self, suppress=False):
-        """主线程轮询调用，返回 True 表示这次点了桌面空白；suppress=True 时忽略跨出半屏游戏窗口的误点。"""
+        """主线程轮询调用：按下与拖拽期间零 COM 调用；仅在松开左键且确认为短促原地单击后才判定空白。"""
         down = key_down(VK_LBUTTON)
         if down and not self._held:
             self._held = True
             self._down_x, self._down_y = get_cursor()
-            self._down_blank = False if suppress else self.is_blank_click(self._down_x, self._down_y)
+            self._down_at = time.monotonic()
+            # 关键：按下瞬间只做本进程句柄比对，严禁调用 AccessibleObjectFromPoint 打断桌面图标拖拽！
+            self._down_on_desktop = False if suppress else self._is_desktop_hwnd(self._down_x, self._down_y)
         elif not down and self._held:
             self._held = False
-            if suppress:
-                self._down_blank = False
+            was_on_desktop = self._down_on_desktop
+            self._down_on_desktop = False
+            if suppress or not was_on_desktop:
+                return False
+            if time.monotonic() - self._down_at > self.MAX_CLICK_SECONDS:
                 return False
             x, y = get_cursor()
             moved = abs(x - self._down_x) + abs(y - self._down_y)
-            # 仅单击（非拖拽框选）才判断落点
-            if self._down_blank and moved <= self.DRAG_THRESHOLD:
+            # 仅短促原地单击（鼠标已松开，100% 不在拖拽中）才查询落点是否为空白背景
+            if moved <= self.DRAG_THRESHOLD:
                 return self.is_blank_click(x, y)
         return False
 
