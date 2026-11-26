@@ -8,13 +8,14 @@ from win32 import (user32, gdi32, shell32, NOTIFYICONDATAW, ICONINFO, WNDPROC, S
                    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WM_HOTKEY, PBT_APMRESUMESUSPEND,
                    PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK, NIM_ADD, NIM_DELETE, NIF_MESSAGE,
                    NIF_ICON, NIF_TIP, TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, MF_STRING,
-                   IMAGE_ICON, LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON, SM_CYSMICON, MOD_ALT,
-                   MOD_CONTROL, MOD_NOREPEAT, VK_H, VK_T, cursor_pos)
+                   MF_CHECKED, MF_SEPARATOR, IMAGE_ICON, LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON,
+                   SM_CYSMICON, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_H, VK_T, cursor_pos)
 
 WM_TRAY = WM_APP + 1
 IDM_OPEN = 2001
 IDM_QUIT = 2002
 IDM_THEME = 2003
+IDM_GUARD = 2004
 HOTKEY_ICONS = 1
 HOTKEY_THEME = 2
 TRAY_ICON_ID = 1
@@ -35,6 +36,8 @@ class TrayIcon:
         self.on_resume = lambda: None
         self.menu_closed = lambda: None
         self.on_theme = None
+        self.get_focus_guard = None
+        self.on_toggle_focus_guard = None
         self.on_hotkey_icons = None
         self.on_hotkey_theme = None
         self.hotkeys_registered = set()
@@ -112,6 +115,10 @@ class TrayIcon:
         pt = cursor_pos()
         menu = user32.CreatePopupMenu()
         user32.AppendMenuW(menu, MF_STRING, IDM_OPEN, '打开设置')
+        if self.on_toggle_focus_guard:
+            checked = bool(self.get_focus_guard()) if self.get_focus_guard else True
+            flags = MF_STRING | (MF_CHECKED if checked else 0)
+            user32.AppendMenuW(menu, flags, IDM_GUARD, '游戏 / 窗口防误触')
         if self.on_theme:
             try:
                 from theme_switch import is_dark
@@ -119,6 +126,7 @@ class TrayIcon:
             except ImportError:
                 label = '切换深浅主题'
             user32.AppendMenuW(menu, MF_STRING, IDM_THEME, label)
+        user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
         user32.AppendMenuW(menu, MF_STRING, IDM_QUIT, '退出程序')
         user32.SetForegroundWindow(self.hwnd)   # 托盘菜单必需，否则点别处菜单不消失
         cmd = 0
@@ -134,6 +142,8 @@ class TrayIcon:
             self.menu_closed()
         if cmd == IDM_OPEN:
             self._on_open()
+        elif cmd == IDM_GUARD and self.on_toggle_focus_guard:
+            self.on_toggle_focus_guard()
         elif cmd == IDM_THEME and self.on_theme:
             self.on_theme()
         elif cmd == IDM_QUIT:

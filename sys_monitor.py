@@ -7,7 +7,7 @@ from threading import Thread
 import tkinter as tk
 from tkinter import ttk, colorchooser, font
 
-from win32 import (user32, kernel32, iphlpapi, ws2_32, toplevel_hwnd, add_exstyle,
+from win32 import (user32, kernel32, iphlpapi, ws2_32, toplevel_hwnd, add_exstyle, set_click_through,
                    HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, WS_EX_NOACTIVATE,
                    WS_EX_TOOLWINDOW, INVALID_HANDLE_VALUE, IcmpEchoReply, Memory,
                    Interface, InterfaceTable)
@@ -272,6 +272,7 @@ class SystemMonitor:
         self.visible = False
         self.dialog = None
         self.drag_offset = None
+        self._click_through = False
         self.edge_start = None
         self.edge_monitor = None
         self.last_inside = 0.0
@@ -324,10 +325,12 @@ class SystemMonitor:
         return [x, y]
 
     def press(self, event):
+        if self._click_through:
+            return
         self.drag_offset = (event.x_root - self.win.winfo_x(), event.y_root - self.win.winfo_y())
 
     def drag(self, event):
-        if self.drag_offset:
+        if self.drag_offset and not self._click_through:
             self.cfg['position'] = self.place(event.x_root - self.drag_offset[0], event.y_root - self.drag_offset[1])
 
     def release(self, _event):
@@ -336,7 +339,7 @@ class SystemMonitor:
             self.queue_save()
 
     def wheel(self, event):
-        if not event.delta:
+        if self._click_through or not event.delta:
             return
         key, step, lo, hi = ('size', 1, 9, 48) if event.state & 4 else ('alpha', 5, 30, 100)
         self.cfg[key] = max(lo, min(hi, self.cfg[key] + (step if event.delta > 0 else -step)))
@@ -370,6 +373,8 @@ class SystemMonitor:
         self.last_sample = now
 
     def settings(self, _event=None):
+        if _event is not None and self._click_through:
+            return
         if self.dialog and self.dialog.winfo_exists():
             self.dialog.lift()
             return
@@ -499,10 +504,11 @@ class SystemMonitor:
             self.win.after_cancel(self.fade)
         brighten(1)
 
-    def tick(self, now, x, y, monitor, blocked, bar_enabled, suppress_edge=False, foreground=None):
+    def tick(self, now, x, y, monitor, blocked, bar_enabled, suppress_edge=False, foreground=None, guard=False):
         l, t, r, b = monitor
         hide_blocked = blocked and not self.cfg['over_fullscreen']
-        edge = not suppress_edge and (
+        # 游戏/窗口防误触开启时，不因鼠标甩到边缘而突然弹出监控框（若勾选“固定显示”则保留并转为鼠标穿透）
+        edge = not suppress_edge and not guard and not blocked and (
             x < l + 3 if self.cfg['edge'] == '左' else x >= r - 3 and (not bar_enabled or y < (t + b) // 2)
         )
         if hide_blocked or not edge:
@@ -520,17 +526,24 @@ class SystemMonitor:
             self._last_foreground = foreground
 
         if self.visible:
-            wx, wy = self.win.winfo_x(), self.win.winfo_y()
-            inside = wx <= x < wx + self.win.winfo_width() and wy <= y < wy + self.win.winfo_height()
             editing = bool(self.dialog and self.dialog.winfo_exists())
+            want_passthrough = bool((guard or blocked) and not editing)
+            if want_passthrough != self._click_through:
+                self._click_through = want_passthrough
+                set_click_through(self.hwnd, want_passthrough)
+
+            wx, wy = self.win.winfo_x(), self.win.winfo_y()
+            inside = (not want_passthrough) and (wx <= x < wx + self.win.winfo_width() and wy <= y < wy + self.win.winfo_height())
             if inside or edge or editing or self.drag_offset:
                 self.last_inside = now
-            if not editing and (hide_blocked or (not self.cfg['pinned'] and now - self.last_inside >= 1.5)):
+            if not editing and (hide_blocked or (not self.cfg['pinned'] and (guard or now - self.last_inside >= 1.5))):
                 if self.fade:
                     self.win.after_cancel(self.fade)
                     self.fade = None
                 self.win.withdraw()
                 self.visible = False
+                self._click_through = False
+                set_click_through(self.hwnd, False)
                 # 隐藏后清空旧采样基准，避免重新出现时第一帧算出整段隐藏期的平均假值
                 self.sampler.cpu = None
                 self.sampler.net = None

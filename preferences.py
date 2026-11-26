@@ -20,7 +20,8 @@ def resource_path(name):
 # ---------------------------------------------------------------- 开机自启
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 STARTUP_APPROVED_KEY = r'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
-RUN_VALUE = 'JingZhuoMian'
+RUN_VALUE = 'Blanket'
+LEGACY_RUN_VALUE = 'JingZhuoMian'
 _STARTUP_ENABLED_BYTES = bytes([0x02] + [0x00] * 11)
 
 
@@ -40,12 +41,20 @@ def autostart_command():
     return '"{}" "{}"'.format(_pythonw_path(), os.path.join(APP_DIR, 'launch.pyw'))
 
 
-def _registered_command():
+def _registered_command(value_name=RUN_VALUE):
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
-            return str(winreg.QueryValueEx(key, RUN_VALUE)[0])
+            return str(winreg.QueryValueEx(key, value_name)[0])
     except OSError:
         return None
+
+
+def _delete_reg_value(subkey, value_name):
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, value_name)
+    except OSError:
+        pass
 
 
 def _command_parts(command):
@@ -68,11 +77,11 @@ def _command_parts(command):
     )
 
 
-def _startup_approved():
+def _startup_approved(value_name=RUN_VALUE):
     """检查启动项是否未被 Windows「任务管理器 / 系统设置」禁用。"""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED_KEY) as key:
-            data, _ = winreg.QueryValueEx(key, RUN_VALUE)
+            data, _ = winreg.QueryValueEx(key, value_name)
         if isinstance(data, bytes) and data:
             # 首字节偶数（如 0x02）表示已启用，奇数（如 0x03）表示已禁用
             return (data[0] & 1) == 0
@@ -81,49 +90,71 @@ def _startup_approved():
     return True
 
 
-def _approve_startup():
+def _approve_startup(value_name=RUN_VALUE):
     """在 StartupApproved\\Run 中将本程序标记为已启用，解除历史禁用状态。"""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, STARTUP_APPROVED_KEY, 0,
                             winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_BINARY, _STARTUP_ENABLED_BYTES)
+            winreg.SetValueEx(key, value_name, 0, winreg.REG_BINARY, _STARTUP_ENABLED_BYTES)
     except OSError:
         pass
 
 
 def autostart_enabled():
     """开机自启是否已开启、未被系统禁用，并且指向当前解释器与这份程序。"""
-    command = _registered_command()
-    return (command is not None
-            and _command_parts(command) == _command_parts(autostart_command())
-            and _startup_approved())
+    for name in (RUN_VALUE, LEGACY_RUN_VALUE):
+        command = _registered_command(name)
+        if command is not None:
+            return (_command_parts(command) == _command_parts(autostart_command())
+                    and _startup_approved(name))
+    return False
 
 
 def repair_autostart():
-    """自启项存在但指向旧位置（文件夹移动或 Python 解释器路径变更）时，改写为当前路径。返回是否改写。"""
-    command = _registered_command()
-    if command is None or _command_parts(command) == _command_parts(autostart_command()):
+    """修正移动后的自启路径，并将旧版 JingZhuoMian 注册表键无缝迁移为 Blanket。"""
+    cur_cmd = _registered_command(RUN_VALUE)
+    legacy_cmd = _registered_command(LEGACY_RUN_VALUE)
+    if cur_cmd is None and legacy_cmd is None:
         return False
+
+    need_migrate = legacy_cmd is not None
+    active_name = RUN_VALUE if cur_cmd is not None else LEGACY_RUN_VALUE
+    active_cmd = cur_cmd if cur_cmd is not None else legacy_cmd
+    target_cmd = autostart_command()
+
+    if not need_migrate and _command_parts(active_cmd) == _command_parts(target_cmd):
+        return False
+
+    approved = _startup_approved(active_name)
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, autostart_command())
+        if approved:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, target_cmd)
+            _approve_startup(RUN_VALUE)
+        if need_migrate:
+            _delete_reg_value(RUN_KEY, LEGACY_RUN_VALUE)
+            _delete_reg_value(STARTUP_APPROVED_KEY, LEGACY_RUN_VALUE)
         return True
     except OSError:
         return False
 
 
 def set_autostart(enable):
-    """开启/关闭开机自启，成功返回 True。"""
+    """开启/关闭开机自启，成功返回 True（关闭时一并清理新旧自启项与启停记录）。"""
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
             if enable:
                 winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, autostart_command())
-                _approve_startup()
+                _approve_startup(RUN_VALUE)
+                _delete_reg_value(RUN_KEY, LEGACY_RUN_VALUE)
+                _delete_reg_value(STARTUP_APPROVED_KEY, LEGACY_RUN_VALUE)
             else:
-                try:
-                    winreg.DeleteValue(key, RUN_VALUE)
-                except FileNotFoundError:
-                    pass
+                for name in (RUN_VALUE, LEGACY_RUN_VALUE):
+                    try:
+                        winreg.DeleteValue(key, name)
+                    except FileNotFoundError:
+                        pass
+                    _delete_reg_value(STARTUP_APPROVED_KEY, name)
         return True
     except OSError:
         return False
@@ -135,6 +166,7 @@ DEFAULT_CONFIG = {
     'auto': True,
     'zone': 'top',
     'delay': '10',
+    'focus_guard': True,
 }
 
 
@@ -156,6 +188,8 @@ def load_config():
         merged.pop('last_visible', None)
     if not isinstance(merged['auto'], bool):
         merged['auto'] = DEFAULT_CONFIG['auto']
+    if not isinstance(merged.get('focus_guard'), bool):
+        merged['focus_guard'] = DEFAULT_CONFIG['focus_guard']
     if merged['zone'] not in ('top', 'any', 'corner'):
         merged['zone'] = DEFAULT_CONFIG['zone']
     delay = str(merged['delay'])

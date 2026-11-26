@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from widget_layout import capture_anchor, clamp_to_work_area, resolve_anchor
-from win32 import (toplevel_hwnd, add_exstyle, place_on_desktop,
+from win32 import (toplevel_hwnd, add_exstyle, set_click_through, place_on_desktop,
                    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
 
 log = logging.getLogger('desktop')
@@ -199,6 +199,7 @@ class LyricsOverlay:
         self._drag_origin = None
         self._drag_offset = None
         self._dragging = False
+        self._guarded = False
 
         self.win = tk.Toplevel(self.root)
         self.win.withdraw()
@@ -212,7 +213,7 @@ class LyricsOverlay:
         self.canvas.bind('<ButtonPress-1>', self._on_press)
         self.canvas.bind('<B1-Motion>', self._on_motion)
         self.canvas.bind('<ButtonRelease-1>', self._on_release)
-        self.canvas.bind('<ButtonRelease-3>', lambda e: self.media.open_settings())
+        self.canvas.bind('<ButtonRelease-3>', lambda e: None if self._guarded else self.media.open_settings())
 
         self.hwnd = toplevel_hwnd(self.win)
         add_exstyle(self.hwnd, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
@@ -325,7 +326,7 @@ class LyricsOverlay:
         place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop)
 
     def _on_press(self, e):
-        if self.media.prefs['lyrics_mode'] != '独立拖动':
+        if self._guarded or self.media.prefs['lyrics_mode'] != '独立拖动':
             return
         self._drag_origin = (e.x_root, e.y_root)
         self._drag_offset = (e.x_root - self.win.winfo_x(), e.y_root - self.win.winfo_y())
@@ -354,7 +355,10 @@ class LyricsOverlay:
             self.anchor = capture_anchor(self.pos[0], self.pos[1], w, h)
             self.media.on_save()
 
-    def tick(self, state, pos_sec, should_show, on_desktop, force_restack=False):
+    def tick(self, state, pos_sec, should_show, on_desktop, force_restack=False, guard=False):
+        if bool(guard) != self._guarded:
+            self._guarded = bool(guard)
+            set_click_through(self.hwnd, self._guarded)
         prefs = self.media.prefs
         if not (should_show and prefs['lyrics_enabled'] and state['active']):
             if self.win.winfo_viewable():
@@ -400,6 +404,7 @@ class LyricsOverlay:
                 self.pos = [x, y]
             self.win.geometry(f'{x:+d}{y:+d}')
             place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop, show=True)
+            set_click_through(self.hwnd, self._guarded)
         elif not visible or force_restack:
             x, y = self._target_xy(prefs)
             if prefs['lyrics_mode'] == '独立拖动':
@@ -407,6 +412,7 @@ class LyricsOverlay:
             if not visible:
                 self.win.geometry(f'{x:+d}{y:+d}')
             place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop, show=True)
+            set_click_through(self.hwnd, self._guarded)
         elif prefs['lyrics_mode'] == '紧贴胶囊下方' and not self._dragging:
             x, y = self._target_xy(prefs)
             if abs(x - self.win.winfo_x()) > 1 or abs(y - self.win.winfo_y()) > 1:

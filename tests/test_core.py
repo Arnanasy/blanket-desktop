@@ -90,6 +90,57 @@ class TestPreferences(unittest.TestCase):
         self.assertNotEqual(preferences._command_parts(c1), preferences._command_parts(c3))
         self.assertEqual(preferences._command_parts('only_one_arg'), ('', ''))
 
+    def test_focus_guard_config_sanitization_and_legacy_autostart_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cn_dir = Path(tmp) / '中文配置目录'
+            cn_dir.mkdir()
+            cfg_path = str(cn_dir / 'config.json')
+            Path(cfg_path).write_text(json.dumps({'focus_guard': 'invalid'}), encoding='utf-8')
+            with mock.patch.object(preferences, 'APP_DIR', str(cn_dir)), \
+                 mock.patch.object(preferences, 'CONFIG_PATH', cfg_path):
+                cfg = preferences.load_config()
+                self.assertIs(cfg['focus_guard'], True)
+
+        # 模拟旧版 JingZhuoMian 注册表项平滑迁移到 Blanket
+        target_cmd = preferences.autostart_command()
+        store = {
+            (preferences.RUN_KEY, 'JingZhuoMian'): target_cmd,
+        }
+        deleted = []
+        written = {}
+
+        class FakeKey:
+            def __init__(self, subkey):
+                self.subkey = subkey
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        def fake_open(_root, subkey, *_args):
+            return FakeKey(subkey)
+
+        def fake_query(key_obj, name):
+            if (key_obj.subkey, name) in store:
+                return store[(key_obj.subkey, name)], 1
+            raise FileNotFoundError(name)
+
+        def fake_set(key_obj, name, _res, _typ, val):
+            written[(key_obj.subkey, name)] = val
+
+        def fake_del(key_obj, name):
+            deleted.append((key_obj.subkey, name))
+
+        with mock.patch.object(preferences.winreg, 'OpenKey', side_effect=fake_open), \
+             mock.patch.object(preferences.winreg, 'QueryValueEx', side_effect=fake_query), \
+             mock.patch.object(preferences.winreg, 'SetValueEx', side_effect=fake_set), \
+             mock.patch.object(preferences.winreg, 'DeleteValue', side_effect=fake_del):
+            self.assertTrue(preferences.autostart_enabled())
+            self.assertTrue(preferences.repair_autostart())
+            self.assertEqual(written.get((preferences.RUN_KEY, 'Blanket')), target_cmd)
+            self.assertIn((preferences.RUN_KEY, 'JingZhuoMian'), deleted)
+            self.assertIn((preferences.STARTUP_APPROVED_KEY, 'JingZhuoMian'), deleted)
+
 
 class TestLocalWeather(unittest.TestCase):
     """天气缓存命中、日期匹配、国内源解析与海外回退逻辑。"""
@@ -311,6 +362,51 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         self.assertTrue(dw.resolve_on_desktop(100, 'Shell_TrayWnd', prev_on_desktop=True))
         # 点回普通软件：立刻返回 False 沉底
         self.assertFalse(dw.resolve_on_desktop(300, 'Chrome_WidgetWin_1', prev_on_desktop=True))
+
+    def test_focus_guard_external_app_detection_and_click_through(self):
+        import desktop_widgets as dw
+        import desktop_windows as dwin
+
+        # 半屏游戏或外部软件在前台 -> 激活防误触锁定
+        self.assertTrue(dw.resolve_external_app_active(500, 'UnrealWindow', own_window=False, prev_external=False))
+        # Blanket 自己的设置窗口在前台 -> 允许交互调整挂件位置
+        self.assertFalse(dw.resolve_external_app_active(501, 'Toplevel', own_window=True, prev_external=True))
+        # 回到桌面 -> 解除锁定，恢复全部交互
+        self.assertFalse(dw.resolve_external_app_active(200, 'WorkerW', own_window=False, prev_external=True))
+        self.assertFalse(dw.resolve_external_app_active(201, 'Progman', own_window=False, prev_external=True))
+        # 短暂点击任务栏或焦点过渡空句柄 -> 沿用上一帧状态
+        self.assertTrue(dw.resolve_external_app_active(100, 'Shell_TrayWnd', own_window=False, prev_external=True))
+        self.assertFalse(dw.resolve_external_app_active(100, 'Shell_TrayWnd', own_window=False, prev_external=False))
+        self.assertTrue(dw.resolve_external_app_active(0, '', own_window=False, prev_external=True))
+
+        # 半屏游戏防误触开启时，失手点到窗外桌面空白不触发图标显隐切换
+        dc = dwin.DesktopClick()
+        with mock.patch.object(dwin, 'key_down', side_effect=[True, False]), \
+             mock.patch.object(dwin, 'get_cursor', return_value=(100, 100)), \
+             mock.patch.object(dc, 'is_blank_click', return_value=True):
+            self.assertFalse(dc.check(suppress=True))
+            self.assertFalse(dc.check(suppress=True))
+
+        # 已在桌面（suppress=False）时单击桌面空白正常切换图标
+        with mock.patch.object(dwin, 'key_down', side_effect=[True, False]), \
+             mock.patch.object(dwin, 'get_cursor', return_value=(100, 100)), \
+             mock.patch.object(dc, 'is_blank_click', return_value=True):
+            self.assertFalse(dc.check(suppress=False))
+            self.assertTrue(dc.check(suppress=False))
+
+        # 验证 set_click_through 仅切换 WS_EX_TRANSPARENT 且保留原有扩展样式
+        base_style = win32.WS_EX_NOACTIVATE | win32.WS_EX_TOOLWINDOW
+        recorded = []
+        with mock.patch.object(win32, 'GetWindowLongPtr', return_value=base_style), \
+             mock.patch.object(win32, 'SetWindowLongPtr', side_effect=lambda h, idx, val: recorded.append(val)):
+            win32.set_click_through(12345, True)
+            self.assertEqual(recorded[-1], base_style | win32.WS_EX_LAYERED | win32.WS_EX_TRANSPARENT)
+
+        layered_through = base_style | win32.WS_EX_LAYERED | win32.WS_EX_TRANSPARENT
+        with mock.patch.object(win32, 'GetWindowLongPtr', return_value=layered_through), \
+             mock.patch.object(win32, 'SetWindowLongPtr', side_effect=lambda h, idx, val: recorded.append(val)):
+            win32.set_click_through(12345, False)
+            self.assertEqual(recorded[-1], base_style | win32.WS_EX_LAYERED)
 
     def test_audio_monitor_state_merge_and_lyrics_fallback(self):
         import audio_monitor as am

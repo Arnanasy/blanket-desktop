@@ -31,9 +31,11 @@ from win32 import (kernel32, wtsapi32, toplevel_hwnd, key_down, ERROR_ALREADY_EX
                    EVENT_MODIFY_STATE, WAIT_OBJECT_0, NOTIFY_FOR_THIS_SESSION,
                    VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_CONTROL, VK_MENU, VK_H, VK_T)
 
-# 单实例与“双击快捷方式唤起主窗口”的跨进程内核对象
-MUTEX_NAME = 'Local\\JingZhuoMian_SingleInstance'
-EVENT_NAME = 'Local\\JingZhuoMian_ShowRequest'
+# 单实例与“双击快捷方式唤起主窗口”的跨进程内核对象（兼容旧版运行实例唤起）
+MUTEX_NAME = 'Local\\Blanket_SingleInstance'
+LEGACY_MUTEX_NAME = 'Local\\JingZhuoMian_SingleInstance'
+EVENT_NAME = 'Local\\Blanket_ShowRequest'
+LEGACY_EVENT_NAME = 'Local\\JingZhuoMian_ShowRequest'
 
 POLL_MS = 150            # 主轮询间隔
 MOUSE_POLL_MS = 20       # 鼠标左键轮询间隔（不装全局低级钩子，避免拖慢系统鼠标）
@@ -135,7 +137,11 @@ class App:
         self.auto_var = tk.BooleanVar(value=bool(self.cfg['auto']))
         check('自动模式（鼠标热区驱动）', self.auto_var, self._persist)
 
-        repair_autostart()     # 程序文件夹移动过时，修正注册表里的旧路径
+        self.focus_guard_var = tk.BooleanVar(value=bool(self.cfg.get('focus_guard', True)))
+        check('游戏 / 窗口防误触（半屏游戏或操作软件时锁定挂件与边缘）',
+              self.focus_guard_var, self._persist, pady=(6, 0))
+
+        repair_autostart()     # 程序文件夹移动过或存在旧注册表名时，自动迁移修正
         self.startup_var = tk.BooleanVar(value=autostart_enabled())
         check('开机自启（登录后自动运行）', self.startup_var, self._toggle_autostart, pady=(6, 0))
 
@@ -198,6 +204,8 @@ class App:
         self.tray = TrayIcon(top_hwnd, self._tray_toggle, self._tray_open, self.quit_app)
         self.tray.on_resume = self.resume_desktop
         self.tray.on_theme = self.toggle_theme
+        self.tray.get_focus_guard = lambda: self.focus_guard_var.get()
+        self.tray.on_toggle_focus_guard = self.toggle_focus_guard
         self.tray.on_hotkey_icons = self.manual_toggle
         self.tray.on_hotkey_theme = self.toggle_theme
         self.mouse_cutoff = 0
@@ -235,7 +243,7 @@ class App:
                 return
             if self.widgets.busy or time.monotonic() <= self.mouse_cutoff:
                 self.desktop_click.reset()
-            elif self.desktop_click.check():
+            elif self.desktop_click.check(suppress=self.widgets.guard_active):
                 self._blank_click()
         finally:
             if not self._quitting:
@@ -361,9 +369,14 @@ class App:
             # 写入失败则回退为实际状态
             self.startup_var.set(autostart_enabled())
 
+    def toggle_focus_guard(self):
+        self.focus_guard_var.set(not self.focus_guard_var.get())
+        self._persist()
+
     def _persist(self):
         self.cfg.update({
             'auto': self.auto_var.get(),
+            'focus_guard': self.focus_guard_var.get(),
             'zone': self.zone_var.get(),
             'delay': self.delay_var.get(),
         })
@@ -511,15 +524,19 @@ class App:
             self.dot_canvas.itemconfig(self.dot, fill=GRAY, outline=GRAY)
 
 
-def _signal_running_instance(mutex):
+def _signal_running_instance(mutex, event_names=(EVENT_NAME, LEGACY_EVENT_NAME)):
     """已有实例在运行：通知它显示设置窗口，然后本进程退出。"""
     existing_event = None
     for _ in range(20):
-        existing_event = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, EVENT_NAME)
+        for ev_name in event_names:
+            existing_event = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, ev_name)
+            if existing_event:
+                break
         if existing_event:
             break
         time.sleep(0.1)
-    kernel32.CloseHandle(mutex)
+    if mutex:
+        kernel32.CloseHandle(mutex)
     if not existing_event:
         raise RuntimeError('Blanket 已经运行，但未能唤出设置。请从托盘退出旧版本后重试。')
     kernel32.SetEvent(existing_event)
@@ -527,6 +544,13 @@ def _signal_running_instance(mutex):
 
 
 def main():
+    legacy_mutex = kernel32.CreateMutexW(None, False, LEGACY_MUTEX_NAME)
+    if legacy_mutex and ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        _signal_running_instance(legacy_mutex, (LEGACY_EVENT_NAME, EVENT_NAME))
+        return
+    if legacy_mutex:
+        kernel32.CloseHandle(legacy_mutex)
+
     mutex = kernel32.CreateMutexW(None, False, MUTEX_NAME)
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())

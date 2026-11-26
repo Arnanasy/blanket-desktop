@@ -22,7 +22,7 @@ from media_renderer import (CARD_BORDER, KEY_COLOR, make_card_bg, make_rounded_c
                             render_media_card)
 from media_settings import open_media_settings
 from widget_layout import capture_anchor, clamp_to_work_area, resolve_anchor
-from win32 import (toplevel_hwnd, add_exstyle, place_on_desktop,
+from win32 import (toplevel_hwnd, add_exstyle, set_click_through, place_on_desktop,
                    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
 
 log = logging.getLogger('desktop')
@@ -360,6 +360,7 @@ class MediaWidget:
         self._seek_preview = None
         self._bar_rect = None
         self._btn_rects = {}
+        self._guarded = False
         self.dialog = None
         self._dlg_vars = {}
 
@@ -379,7 +380,7 @@ class MediaWidget:
         self.canvas.bind('<B1-Motion>', self._on_motion)
         self.canvas.bind('<ButtonRelease-1>', self._on_release)
         self.canvas.bind('<Double-Button-1>', self._on_double_click)
-        self.canvas.bind('<ButtonRelease-3>', lambda e: self.open_settings())
+        self.canvas.bind('<ButtonRelease-3>', lambda e: None if self._guarded else self.open_settings())
         self.canvas.bind('<MouseWheel>', self._on_wheel)
 
         self.hwnd = toplevel_hwnd(self.win)
@@ -502,7 +503,7 @@ class MediaWidget:
         self._hint_timer = self.root.after(800, lambda: self.canvas.delete('hint'))
 
     def _on_wheel(self, event):
-        if not event.delta:
+        if self._guarded or not event.delta:
             return
         direction = 1 if event.delta > 0 else -1
         if event.state & 4:  # Ctrl + 滚轮调缩放
@@ -530,6 +531,8 @@ class MediaWidget:
 
     # ------------------------------------------------------------ 交互事件
     def _on_enter(self, _e=None):
+        if self._guarded:
+            return
         self._hover = True
         self._leave_at = 0.0
         self._start_anim(1.0)
@@ -566,7 +569,7 @@ class MediaWidget:
             self._render()
 
     def _on_double_click(self, _e=None):
-        if self._seeking:
+        if self._guarded or self._seeking:
             return
         self.locked = not self.locked
         if self.dialog and self.dialog.winfo_exists() and 'locked' in self._dlg_vars:
@@ -582,6 +585,8 @@ class MediaWidget:
         return None
 
     def _on_press(self, e):
+        if self._guarded:
+            return
         if self._progress > 0.82 and self._hit_bar(e.x, e.y):
             sec = self._seek_sec_from_x(e.x)
             if sec is not None:
@@ -644,7 +649,15 @@ class MediaWidget:
             self.worker.send(action)
 
     # ------------------------------------------------------------ 主循环调度
-    def tick(self, now, blocked, icons_visible, on_desktop=False, force_restack=False):
+    def tick(self, now, blocked, icons_visible, on_desktop=False, force_restack=False, guard=False):
+        if bool(guard) != self._guarded:
+            self._guarded = bool(guard)
+            set_click_through(self.hwnd, self._guarded)
+            if self._guarded and self._hover:
+                self._hover = False
+                self._hover_btn = None
+                if not self.locked:
+                    self._start_anim(0.0)
         audio_assist = bool(self.prefs.get('audio_assist', True))
         if not self.enabled.get() or (not HAS_WINRT and not audio_assist):
             self.audio_monitor.stop()
@@ -705,6 +718,7 @@ class MediaWidget:
                     self.win.geometry(f'{x:+d}{y:+d}')
                     self._render()
                 place_on_desktop(self.hwnd, x, y, on_desktop=on_desktop, show=True)
+                set_click_through(self.hwnd, self._guarded)
             elif self._progress > 0.82 and not self._animating:
                 cur_sec = int(est_pos)
                 if cur_sec != self._last_progress_sec:
@@ -714,4 +728,4 @@ class MediaWidget:
             self.win.withdraw()
 
         self.lyrics.tick(self._state, est_pos, should_show,
-                         on_desktop=on_desktop, force_restack=force_restack)
+                         on_desktop=on_desktop, force_restack=force_restack, guard=self._guarded)

@@ -36,7 +36,9 @@ GWL_STYLE = -16
 GWL_EXSTYLE = -20
 GWLP_WNDPROC = -4
 WS_CAPTION = 0x00C00000              # 标题栏（用于区分普通最大化窗口与真正全屏）
+WS_EX_TRANSPARENT = 0x00000020       # 鼠标点击穿透（直达下层游戏或桌面）
 WS_EX_TOOLWINDOW = 0x00000080        # 不在任务栏 / Alt+Tab 中出现
+WS_EX_LAYERED = 0x00080000           # 分层窗口（配合穿透与透明色键）
 WS_EX_NOACTIVATE = 0x08000000        # 点击不抢焦点
 DWMWA_EXTENDED_FRAME_BOUNDS = 9      # DWM 真实可见窗口边界（不含隐形阴影）
 HWND_TOP = 0
@@ -105,6 +107,8 @@ TPM_RIGHTBUTTON = 0x0002
 TPM_NONOTIFY = 0x0080
 TPM_RETURNCMD = 0x0100
 MF_STRING = 0x0000
+MF_CHECKED = 0x0008
+MF_SEPARATOR = 0x0800
 IMAGE_ICON = 1
 LR_LOADFROMFILE = 0x0010
 NULL_PEN = 8
@@ -236,6 +240,7 @@ _sig(user32.WindowFromPoint, HWND, POINT)
 _sig(user32.GetClassNameW, INT, HWND, wintypes.LPWSTR, INT)
 _sig(user32.GetAncestor, HWND, HWND, UINT)
 _sig(user32.GetForegroundWindow, HWND)
+_sig(user32.GetWindowThreadProcessId, DWORD, HWND, ctypes.POINTER(DWORD))
 _sig(user32.SetForegroundWindow, BOOL, HWND)
 _sig(user32.SetWindowPos, BOOL, HWND, HWND, INT, INT, INT, INT, UINT)
 _sig(user32.GetWindowRect, BOOL, HWND, ctypes.POINTER(RECT))
@@ -332,6 +337,30 @@ def toplevel_hwnd(widget):
 
 def add_exstyle(hwnd, bits):
     SetWindowLongPtr(hwnd, GWL_EXSTYLE, GetWindowLongPtr(hwnd, GWL_EXSTYLE) | bits)
+
+
+def set_click_through(hwnd, enabled):
+    """动态开启或关闭窗口鼠标穿透（穿透时鼠标左右键直达下层游戏/桌面，绝不抢点击）。"""
+    if not hwnd:
+        return
+    cur = GetWindowLongPtr(hwnd, GWL_EXSTYLE)
+    target = (cur | WS_EX_LAYERED | WS_EX_TRANSPARENT) if enabled else (cur & ~WS_EX_TRANSPARENT)
+    if target != cur:
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, target)
+
+
+def is_own_window(hwnd, own_pid=None):
+    """判断指定窗口是否属于本程序进程（例如设置窗口或主面板）。"""
+    if not hwnd:
+        return False
+    pid = DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return False
+    if own_pid is None:
+        import os
+        own_pid = os.getpid()
+    return pid.value == own_pid
 
 
 def key_down(vk):

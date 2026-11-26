@@ -25,10 +25,10 @@ from theme_button import ThemeButton
 from wallpaper_clock import sample
 from widget_layout import AnchorRegistry, capture_anchor, resolve_anchor
 from win32 import (user32, dwmapi, RECT, GetWindowLongPtr, class_name, cursor_pos, toplevel_hwnd,
-                   add_exstyle, place_on_desktop, GWL_STYLE, WS_CAPTION, DWMWA_EXTENDED_FRAME_BOUNDS,
-                   HWND_BOTTOM, SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_NOACTIVATE,
-                   WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-                   SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN)
+                   add_exstyle, set_click_through, is_own_window, place_on_desktop, GWL_STYLE, WS_CAPTION,
+                   DWMWA_EXTENDED_FRAME_BOUNDS, HWND_BOTTOM, SW_SHOWNOACTIVATE, SWP_NOSIZE, SWP_NOMOVE,
+                   SWP_NOZORDER, SWP_NOACTIVATE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, SM_XVIRTUALSCREEN,
+                   SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN)
 
 KEY_COLOR = '#010203'          # 透明色键
 TICK_MS = 150
@@ -56,6 +56,20 @@ def resolve_on_desktop(foreground, fg_class, prev_on_desktop=False):
     if not foreground or fg_class in ('Shell_TrayWnd', 'Shell_SecondaryTrayWnd'):
         return bool(prev_on_desktop)
     return False
+
+
+def resolve_external_app_active(foreground, fg_class, own_window=False, prev_external=False):
+    """判断当前是否正在操作外部软件或半屏/全屏游戏（用于防误触锁定挂件与屏幕边缘呼出）。
+
+    - 前景为桌面或 Blanket 自身的设置窗口：返回 False（允许正常交互）；
+    - 前景为任务栏或短暂空句柄：沿用上一帧状态；
+    - 前景为任何外部程序/窗口化游戏：返回 True（启用防误触保护）。
+    """
+    if own_window or fg_class in ('WorkerW', 'Progman'):
+        return False
+    if not foreground or fg_class in ('Shell_TrayWnd', 'Shell_SecondaryTrayWnd'):
+        return bool(prev_external)
+    return True
 
 
 SHELL_CLASSES = ('Progman', 'WorkerW', 'Shell_TrayWnd', 'Shell_SecondaryTrayWnd')
@@ -119,10 +133,10 @@ class Widgets:
         bind('<ButtonPress-1>', self.drag_start)
         bind('<B1-Motion>', self.drag)
         bind('<ButtonRelease-1>', lambda e: self.finish_drag())
-        bind('<Double-Button-1>', lambda e: self.app.toggle_theme())
-        bind('<Button-3>', lambda e: self.settings())
+        bind('<Double-Button-1>', lambda e: None if self.guard_active else self.app.toggle_theme())
+        bind('<Button-3>', lambda e: None if self.guard_active else self.settings())
         bind('<MouseWheel>', self.wheel)
-        bind('<Button-2>', lambda e: self.adjust('seconds', not self.style['seconds']))
+        bind('<Button-2>', lambda e: None if self.guard_active else self.adjust('seconds', not self.style['seconds']))
         self.clock_hwnd = toplevel_hwnd(self.clock)
         add_exstyle(self.clock_hwnd, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
         self.draw_clock()
@@ -142,6 +156,8 @@ class Widgets:
         self.last_clock = ''
         self.last_desktop_foreground = None
         self._was_on_desktop = False
+        self._external_active = False
+        self._clock_passthrough = False
         self.last_position_check = 0
         self.root.after(TICK_MS, self.tick)
 
@@ -182,6 +198,13 @@ class Widgets:
     def busy(self):
         return self.bar.busy
 
+    @property
+    def guard_active(self):
+        """是否处于游戏 / 窗口防误触锁定态。"""
+        focus_var = getattr(self.app, 'focus_guard_var', None)
+        enabled = bool(focus_var.get()) if focus_var is not None else True
+        return enabled and self._external_active
+
     def hide_all(self):
         """退出时立即隐藏全部挂件和弹窗，做到点击即消失。"""
         self.hide_weather_tip()
@@ -217,7 +240,7 @@ class Widgets:
 
     # ------------------------------------------------------------ 时钟外观
     def wheel(self, event):
-        if not event.delta:
+        if self.guard_active or not event.delta:
             return
         direction = 1 if event.delta > 0 else -1
         if event.state & 4:       # Ctrl + 滚轮调字号
@@ -317,7 +340,7 @@ class Widgets:
 
     def show_weather_tip(self, event):
         self.hide_weather_tip()
-        if not self.weather_on.get():
+        if self.guard_active or not self.weather_on.get():
             return
         details = self.weather_status
         if self.weather:
@@ -617,6 +640,8 @@ class Widgets:
         self.cfg['position'] = [x, y]
 
     def drag_start(self, e):
+        if self.guard_active:
+            return
         self._drag_origin = (e.x_root, e.y_root)
         self._dragging = False
         self.offset = (e.x_root - self.clock.winfo_x(), e.y_root - self.clock.winfo_y())
@@ -733,16 +758,28 @@ class Widgets:
             invalidate_cache()       # 桌面窗口可能被重建，重新查找
         self.last_desktop_foreground = desktop_foreground
         on_desktop = resolve_on_desktop(foreground, name, self._was_on_desktop)
+        own_win = False if on_desktop else is_own_window(foreground)
+        self._external_active = resolve_external_app_active(
+            foreground, name, own_window=own_win, prev_external=self._external_active,
+        )
+        guard = self.guard_active
         restack = (on_desktop != self._was_on_desktop) or bool(user32.IsIconic(self.clock_hwnd))
         self._was_on_desktop = on_desktop
         blocked = self.fullscreen_active(foreground, name)
         icons = self.app.desktop_icons_visible()
+
+        if guard != self._clock_passthrough:
+            self._clock_passthrough = guard
+            set_click_through(self.clock_hwnd, guard)
+            if guard:
+                self.hide_weather_tip()
 
         # 时钟：仅在图标隐藏、且没有全屏程序时显示；退回桌面或 Win+D 时自动拉回桌面之上
         visible = bool(self.clock.winfo_viewable())
         if self.clock_on.get() and icons is False and not blocked:
             if not visible:
                 self._show_clock(on_desktop=on_desktop)
+                set_click_through(self.clock_hwnd, guard)
             elif restack and self.offset is None:
                 place_on_desktop(self.clock_hwnd, on_desktop=on_desktop, show=True)
             elif self.offset is None and now - self.last_position_check > 1:
@@ -752,11 +789,11 @@ class Widgets:
         elif visible:
             self.clock.withdraw()
 
-        theme_edge = self.theme_button.tick(now, p, blocked, icons)
+        theme_edge = self.theme_button.tick(now, p, blocked, icons, guard=guard)
         monitor = bounds(p.x, p.y)
         monitor_edge = self.monitor.tick(now, p.x, p.y, monitor, blocked, self.bar.enabled.get(),
-                                         suppress_edge=theme_edge, foreground=foreground)
-        self.media.tick(now, blocked, icons, on_desktop=on_desktop, force_restack=restack)
-        bar_opened = self.bar.tick(now, p, monitor, blocked, monitor_edge, theme_edge)
+                                         suppress_edge=theme_edge, foreground=foreground, guard=guard)
+        self.media.tick(now, blocked, icons, on_desktop=on_desktop, force_restack=restack, guard=guard)
+        bar_opened = self.bar.tick(now, p, monitor, blocked, monitor_edge, theme_edge, guard=guard)
         if bar_opened:
             self.theme_button.raise_()

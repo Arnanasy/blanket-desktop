@@ -46,4 +46,4 @@ Type: files; Name: "{app}\Blanket_error.log*"
 Type: files; Name: "{app}\config.json"
 
 [UninstallRun]
-Filename: "{cmd}"; Parameters: "/C reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v JingZhuoMian /f >nul 2>&1"; Flags: runhidden
+Filename: "{cmd}"; Parameters: "/C reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v Blanket /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Run"" /v JingZhuoMian /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"" /v Blanket /f >nul 2>&1 & reg delete ""HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"" /v JingZhuoMian /f >nul 2>&1"; Flags: runhidden

@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 from display_geometry import bounds
 
@@ -61,15 +61,22 @@ class LauncherBar:
             for path in self.recent:
                 self._button(Path(path).name, lambda p=path: self.open(p))
         for name, paths in self.groups.items():
-            self._button(('▾ ' if name in self.expanded else '▸ ') + name, lambda n=name: self.fold(n))
+            hdr = self._button(('▾ ' if name in self.expanded else '▸ ') + name, lambda n=name: self.fold(n))
+            if name not in DEFAULT_GROUPS:
+                hdr.bind('<Button-3>', lambda e, n=name: self.delete_group(n))
             if name in self.expanded:
                 for path in paths:
-                    b = tk.Button(self.win, text='  ' + Path(path).stem, command=lambda p=path: self.open(p),
+                    icon = '📁 ' if os.path.isdir(path) else '📄 '
+                    label_txt = Path(path).name if os.path.isdir(path) else Path(path).stem
+                    if len(label_txt) > 22:
+                        label_txt = label_txt[:21] + '…'
+                    b = tk.Button(self.win, text='  ' + icon + label_txt, command=lambda p=path: self.open(p),
                                   bg=ITEM_BG, fg='white', relief='flat', anchor='w', padx=15)
                     b.pack(fill='x')
                     b.bind('<Button-3>', lambda e, n=name, p=path: self.remove(n, p))
                 self._button('  ＋ 添加软件 / 文件', lambda n=name: self.add(n, False))
                 self._button('  ＋ 添加文件夹', lambda n=name: self.add(n, True))
+        self._button('＋ 新建快捷分组', self.create_group)
         self._button('暂停 / 恢复自动隐藏', self.app.pause_auto)
         self.theme_item = self._button('', self.app.toggle_theme)
         self.set_theme_label(self.widgets.theme_button.dark)
@@ -117,6 +124,38 @@ class LauncherBar:
             self.busy = False
             self.last_inside = time.monotonic()
 
+    def create_group(self):
+        self.busy = True
+        try:
+            raw = simpledialog.askstring('新建分组', '请输入新快捷分组名称：', parent=self.win)
+            name = (raw or '').strip()[:16]
+            if name and name not in self.groups:
+                self.groups[name] = []
+                self.expanded.add(name)
+                self.widgets.save()
+                self.render()
+                self._refresh_if_visible()
+        finally:
+            self.app.discard_mouse()
+            self.busy = False
+            self.last_inside = time.monotonic()
+
+    def delete_group(self, name):
+        if name in DEFAULT_GROUPS or name not in self.groups:
+            return
+        self.busy = True
+        try:
+            if messagebox.askyesno('删除分组', f'确定要删除自定义分组「{name}」吗？', parent=self.win):
+                self.groups.pop(name, None)
+                self.expanded.discard(name)
+                self.widgets.save()
+                self.render()
+                self._refresh_if_visible()
+        finally:
+            self.app.discard_mouse()
+            self.busy = False
+            self.last_inside = time.monotonic()
+
     def remove(self, name, path):
         items = self.groups.get(name, [])
         if path in items:
@@ -150,11 +189,11 @@ class LauncherBar:
         self.render()
 
     # ------------------------------------------------------------ 主循环
-    def tick(self, now, p, monitor, blocked, monitor_edge, theme_edge):
+    def tick(self, now, p, monitor, blocked, monitor_edge, theme_edge, guard=False):
         """返回本轮是否刚弹出。"""
         l, t, r, b = monitor
         enabled = self.enabled.get()
-        edge = enabled and p.x >= r - 3 and not blocked and not monitor_edge and not theme_edge
+        edge = enabled and p.x >= r - 3 and not blocked and not guard and not monitor_edge and not theme_edge
         if not edge:
             self.edge_since = None
         elif self.edge_since is None or self.edge_monitor != monitor:
@@ -171,8 +210,8 @@ class LauncherBar:
 
         if self.win.winfo_viewable():
             x, y = self.win.winfo_x(), self.win.winfo_y()
-            if x <= p.x < x + self.win.winfo_width() and y <= p.y < y + self.win.winfo_height():
+            if not guard and (x <= p.x < x + self.win.winfo_width() and y <= p.y < y + self.win.winfo_height()):
                 self.last_inside = now
-            if not self.busy and (not enabled or blocked or now - self.last_inside > CLOSE_DELAY):
+            if not self.busy and (not enabled or blocked or guard or now - self.last_inside > CLOSE_DELAY):
                 self.win.withdraw()
         return opened

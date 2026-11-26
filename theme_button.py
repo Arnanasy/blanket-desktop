@@ -40,6 +40,7 @@ class ThemeButton:
         self._press_pt = None
         self._press_y = self.cur_y
         self._dragging = False
+        self._guarded = False
 
         self.win = tk.Toplevel(root)
         self.win.withdraw()
@@ -55,7 +56,7 @@ class ThemeButton:
         self.win.bind('<ButtonPress-1>', self._on_press)
         self.win.bind('<B1-Motion>', self._on_motion)
         self.win.bind('<ButtonRelease-1>', self._on_release)
-        self.win.bind('<ButtonRelease-3>', lambda e: on_settings())
+        self.win.bind('<ButtonRelease-3>', lambda e: None if self._guarded else on_settings())
         self.hwnd = toplevel_hwnd(self.win)
         add_exstyle(self.hwnd, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
         self.refresh(force=True)
@@ -178,12 +179,14 @@ class ThemeButton:
         self.last_hover = time.monotonic()
 
     # ------------------------------------------------------------ 主循环
-    def tick(self, now, p, fullscreen, icons_visible):
+    def tick(self, now, p, fullscreen, icons_visible, guard=False):
         """返回 True 表示鼠标正在按钮附近，主循环不应再弹出右侧启动栏。"""
+        self._guarded = bool(guard or fullscreen)
         always = self.always.get()
-        blocked = fullscreen and not always
+        blocked = fullscreen or guard
         if not (always or icons_visible is False) or blocked:
             if self.visible():
+                self.expanded = False
                 self.win.withdraw()
             return False
         if not self.visible():

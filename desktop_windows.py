@@ -168,15 +168,18 @@ class DesktopClick:
         self._held = key_down(VK_LBUTTON)
         self._down_blank = False
 
-    def check(self):
-        """主线程轮询调用，返回 True 表示这次点了桌面空白。"""
+    def check(self, suppress=False):
+        """主线程轮询调用，返回 True 表示这次点了桌面空白；suppress=True 时忽略跨出半屏游戏窗口的误点。"""
         down = key_down(VK_LBUTTON)
         if down and not self._held:
             self._held = True
             self._down_x, self._down_y = get_cursor()
-            self._down_blank = self.is_blank_click(self._down_x, self._down_y)
+            self._down_blank = False if suppress else self.is_blank_click(self._down_x, self._down_y)
         elif not down and self._held:
             self._held = False
+            if suppress:
+                self._down_blank = False
+                return False
             x, y = get_cursor()
             moved = abs(x - self._down_x) + abs(y - self._down_y)
             # 仅单击（非拖拽框选）才判断落点
