@@ -619,6 +619,12 @@ class TestClockExtrasAndLayout(unittest.TestCase):
                     self.assertFalse(qh.copy_file_to_clipboard(sample_f))
                     self.assertEqual(freed, [addr])
 
+        # 验证独立番茄钟配置清洗边界
+        import countdown_widget as cw
+        c_cfg = cw.sanitize_countdown_cfg({'size': 999, 'opacity': 10, 'style': '未知'})
+        self.assertEqual(c_cfg, {'size': 56, 'opacity': 35, 'style': '圆角卡片'})
+        self.assertEqual(cw.sanitize_countdown_cfg({'style': '极简透明'})['style'], '极简透明')
+
 
 if __name__ == '__main__':
     unittest.main()

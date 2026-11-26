@@ -16,7 +16,7 @@ from preferences import APP_DIR
 from quick_hub import (MAX_NOTES, MAX_NOTE_LEN, KeepAwake, copy_file_to_clipboard,
                        launch_deskkit, reveal_in_explorer, sanitize_notes,
                        scan_recent_files, turn_off_monitors)
-from win32 import (GetWindowLongPtr, SetWindowLongPtr, add_exstyle, toplevel_hwnd,
+from win32 import (user32, GetWindowLongPtr, SetWindowLongPtr, add_exstyle, toplevel_hwnd,
                    GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW)
 
 BAR_BG = '#0F172A'
@@ -61,6 +61,7 @@ class LauncherBar:
         self.groups_section_open = False
         self.busy = False            # 模态对话框打开期间为 True：不收起、不响应桌面点击
         self._note_focused = False   # 正在便签输入框打字时保持抽屉展开，绝不吞字
+        self._note_last_input = 0.0  # 最近一次在便签输入框敲字或点击的时刻，防焦点卡死不收起
         self._note_draft = tk.StringVar(master=widgets.root, value='')
 
         self.awake = KeepAwake()
@@ -151,9 +152,10 @@ class LauncherBar:
         dk_btn.grid(row=1, column=1, sticky='ew', padx=(3, 0))
         dk_btn.bind('<Button-3>', lambda _e: self._pick_deskkit_path())
 
-        # 2. 极简倒计时 / 番茄钟（联动桌面大时钟）
-        cd_card = self._card('🍅 桌面时钟倒计时')
-        if self.widgets.timer_end > time.monotonic():
+        # 2. 独立可拖动番茄钟 / 倒计时
+        cd_card = self._card('🍅 番茄钟（开启后可自由拖动）')
+        cd_widget = getattr(self.widgets, 'countdown', None)
+        if cd_widget is not None and cd_widget.active:
             row = tk.Frame(cd_card, bg=CARD_BG)
             row.pack(fill='x')
             txt = self.widgets.current_countdown_text() or '⏳ 倒计时进行中'
@@ -206,7 +208,8 @@ class LauncherBar:
             )
             entry.pack(side='left', fill='x', expand=True, ipady=4, padx=(0, 4))
             entry.bind('<Button-1>', lambda _e, w=entry: self._focus_note_entry(w))
-            entry.bind('<FocusIn>', lambda _e: setattr(self, '_note_focused', True))
+            entry.bind('<Key>', lambda _e: setattr(self, '_note_last_input', time.monotonic()))
+            entry.bind('<FocusIn>', lambda _e: self._on_note_focus_in())
             entry.bind('<FocusOut>', lambda _e: setattr(self, '_note_focused', False))
             entry.bind('<Return>', lambda _e: self._add_note())
             self._pill_btn(in_row, '＋添加', self._add_note, bg='#2563EB').pack(side='right')
@@ -300,12 +303,15 @@ class LauncherBar:
 
     def _start_timer(self, minutes, label='专注'):
         self.widgets.start_countdown(minutes, label)
+        # 启动番茄钟后立即自动收起侧边栏，避免挡视线
+        self._dismiss()
 
     def _cancel_timer(self):
         self.widgets.cancel_countdown()
 
     def _custom_timer(self):
         self.busy = True
+        started = False
         try:
             mins = simpledialog.askinteger(
                 '自定义倒计时', '请输入倒计时分钟数（1 ~ 360）：',
@@ -313,23 +319,32 @@ class LauncherBar:
             )
             if mins:
                 self.widgets.start_countdown(mins, '倒计时')
+                started = True
         finally:
             self.app.discard_mouse()
             self.busy = False
             self.last_inside = time.monotonic()
+        if started:
+            self._dismiss()
 
     def refresh_countdown_ui(self, text=None):
         """同步侧边栏倒计时标签或切换按钮态。"""
-        active = self.widgets.timer_end > time.monotonic()
+        cd_widget = getattr(self.widgets, 'countdown', None)
+        active = bool(cd_widget and cd_widget.active)
         if active and self.countdown_label is not None and self.countdown_label.winfo_exists():
             self.countdown_label.configure(text=text or self.widgets.current_countdown_text())
-        else:
+        elif (not active and self.countdown_label is not None) or (active and self.countdown_label is None):
             self.render()
             self._refresh_if_visible()
 
     # ------------------------------------------------------------ 便签动作
+    def _on_note_focus_in(self):
+        self._note_focused = True
+        self._note_last_input = time.monotonic()
+
     def _focus_note_entry(self, entry_widget):
         self._note_focused = True
+        self._note_last_input = time.monotonic()
         self.last_inside = time.monotonic()
         self._set_noactivate(False)
         try:
@@ -578,10 +593,20 @@ class LauncherBar:
 
         if self.win.winfo_viewable():
             x, y = self.win.winfo_x(), self.win.winfo_y()
-            if x <= p.x < x + self.win.winfo_width() and y <= p.y < y + self.win.winfo_height():
+            inside = x <= p.x < x + self.win.winfo_width() and y <= p.y < y + self.win.winfo_height()
+            if inside:
                 self.last_inside = now
             if self._note_focused:
-                self.last_inside = now
+                # 防止无边框窗口收不到 FocusOut 导致永远不隐藏：
+                # 只要前景不再是本抽屉、或鼠标在抽屉外按下左键、或鼠标在抽屉外且超过 2.5 秒未敲字，立即释放焦点锁
+                fg_lost = user32.GetForegroundWindow() != self.hwnd
+                clicked_out = (not inside) and mouse_held
+                idle_typing = (not inside) and (now - self._note_last_input > 2.5)
+                if fg_lost or clicked_out or idle_typing:
+                    self._note_focused = False
+                    self._set_noactivate(True)
+                else:
+                    self.last_inside = now
             if not self.busy and (not enabled or blocked or now - self.last_inside > CLOSE_DELAY):
                 self._note_focused = False
                 self._set_noactivate(True)
