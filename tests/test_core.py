@@ -549,7 +549,7 @@ class TestClockExtrasAndLayout(unittest.TestCase):
             dk_cmd = dk_dir / 'DeskKit.cmd'
             dk_cmd.write_text('@echo off\n', encoding='utf-8')
             found = qh.find_deskkit_entry('', str(app_dir))
-            self.assertEqual(found, dk_cmd)
+            self.assertEqual(found.resolve(), dk_cmd.resolve())
 
         # 随手便签清洗与条数/长度边界
         notes = qh.sanitize_notes([
