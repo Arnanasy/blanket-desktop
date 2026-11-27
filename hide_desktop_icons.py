@@ -219,6 +219,8 @@ class App:
         self.tray.on_theme = self.toggle_theme
         self.tray.get_focus_guard = lambda: self.focus_guard_var.get()
         self.tray.on_toggle_focus_guard = self.toggle_focus_guard
+        self.tray.get_monitor_pinned = lambda: bool(getattr(self, 'widgets', None) and self.widgets.monitor.is_pinned())
+        self.tray.on_toggle_monitor_pin = self.toggle_monitor_pin
         self.tray.on_hotkey_icons = self.manual_toggle
         self.tray.on_hotkey_theme = self.toggle_theme
         self.mouse_cutoff = 0
@@ -360,9 +362,12 @@ class App:
 
         # ttk 控件与 tk.Scale 走全局样式，设置窗口等弹窗同步生效
         from tkinter import ttk
+        from ui_helpers import install_checkmark_style
         style = ttk.Style(self.root)
         if style.theme_use() != 'clam':
             style.theme_use('clam')
+        ui_scale = max(1.0, self.root.winfo_fpixels('1i') / 96.0)
+        install_checkmark_style(self.root, style, dark=dark, ui_scale=ui_scale)
         style.configure('.', background=bg, foreground=text, fieldbackground=select,
                         troughcolor=bg, selectbackground=BLUE, selectforeground=WHITE)
         for name in ('TButton', 'TCheckbutton', 'TRadiobutton', 'TCombobox'):
@@ -397,6 +402,10 @@ class App:
     def toggle_focus_guard(self):
         self.focus_guard_var.set(not self.focus_guard_var.get())
         self._persist()
+
+    def toggle_monitor_pin(self):
+        if getattr(self, 'widgets', None) and getattr(self.widgets, 'monitor', None):
+            self.widgets.monitor.toggle_pin()
 
     def _persist(self):
         self.cfg.update({

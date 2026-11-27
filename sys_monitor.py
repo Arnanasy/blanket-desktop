@@ -1,21 +1,171 @@
-"""按需呼出的 Windows 系统性能监控挂件（无常驻轮询线程，按启用项采集）。"""
+"""按需呼出的 Windows 系统性能监控挂件（无常驻轮询线程，按启用项采集；支持真逐像素透明与游戏一键置顶）。"""
 import ctypes as c
 from ctypes import wintypes as w
+import os
 import queue
 import socket
 from threading import Thread
+import time
 import tkinter as tk
 from tkinter import ttk, colorchooser, font
 
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
+
 from win32 import (user32, kernel32, iphlpapi, ws2_32, toplevel_hwnd, add_exstyle, set_click_through,
-                   HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, WS_EX_NOACTIVATE,
-                   WS_EX_TOOLWINDOW, INVALID_HANDLE_VALUE, IcmpEchoReply, Memory,
+                   update_layered_rgba, cursor_pos, GetWindowLongPtr,
+                   GWL_EXSTYLE, GW_HWNDPREV, HWND_TOPMOST, SW_SHOWNOACTIVATE,
+                   SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+                   WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+                   INVALID_HANDLE_VALUE, IcmpEchoReply, Memory,
                    Interface, InterfaceTable)
 
 DEFAULT_PING_HOST = '223.5.5.5'
 PING_INTERVAL = 2.0          # Ping 采样间隔（秒），在后台线程执行不阻塞界面
 PING_TIMEOUT_MS = 1000
 NVML_TEMPERATURE_GPU = 0
+
+_FONT_CACHE = {}
+_FONT_PATH_PROBED = False
+_FONT_PATH = None
+
+
+def _find_monitor_font_path():
+    """查找系统清晰中英文字体（优先微软雅黑），避免透明窗口 ClearType 彩边与缺字。"""
+    global _FONT_PATH_PROBED, _FONT_PATH
+    if _FONT_PATH_PROBED:
+        return _FONT_PATH
+    _FONT_PATH_PROBED = True
+    fonts_dir = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts')
+    for name in ('msyh.ttc', 'msyhbd.ttc', 'simhei.ttf', 'segoeui.ttf'):
+        candidate = os.path.join(fonts_dir, name)
+        if os.path.isfile(candidate):
+            _FONT_PATH = candidate
+            return _FONT_PATH
+    return None
+
+
+def _load_pil_font(px_size):
+    path = _find_monitor_font_path()
+    if not HAS_PIL or not path:
+        return None
+    key = (path, max(10, int(px_size)))
+    cached = _FONT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        loaded = ImageFont.truetype(path, key[1])
+        _FONT_CACHE[key] = loaded
+        return loaded
+    except OSError:
+        return None
+
+
+def _parse_rgb(widget, color_str, fallback=(241, 245, 249)):
+    try:
+        r16, g16, b16 = widget.winfo_rgb(color_str)
+        return (r16 >> 8, g16 >> 8, b16 >> 8)
+    except Exception:
+        s = str(color_str or '').lstrip('#')
+        if len(s) == 6:
+            try:
+                return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+            except ValueError:
+                pass
+        return fallback
+
+
+def render_monitor_rgba(rows, size_pt, shape, fg_rgb, bg_rgb, ui_scale=1.0):
+    """用 Pillow 2x 超采样渲染真逐像素 Alpha 监控帧，返回 (width, height, premul_bgra_bytes)；不可用时返回 None。"""
+    if not HAS_PIL:
+        return None
+    scale = max(1.0, float(ui_scale))
+    ss = 2
+    px_size = max(10, round(int(size_pt) * scale * 4 / 3))
+    pil_font = _load_pil_font(px_size * ss)
+    if pil_font is None:
+        return None
+
+    rows = rows or [('—', '')]
+    dummy = ImageDraw.Draw(Image.new('RGBA', (4, 4), (0, 0, 0, 0)))
+
+    # 精确测量每行标签列与数值列尺寸，使中英文混排工整对齐
+    ascent, descent = pil_font.getmetrics()
+    line_h = max(px_size * ss, ascent + descent)
+    line_gap = max(4 * ss, round(line_h * 0.22))
+    col_gap = max(14 * ss, round(px_size * ss * 0.85))
+    pad_x = max(12 * ss, round(px_size * ss * 0.65))
+    pad_y = max(9 * ss, round(px_size * ss * 0.48))
+
+    max_label_w = 0
+    max_val_w = 0
+    has_val = False
+    for label, val in rows:
+        lb = dummy.textbbox((0, 0), label, font=pil_font)
+        max_label_w = max(max_label_w, max(0, lb[2] - lb[0]))
+        if val:
+            has_val = True
+            vb = dummy.textbbox((0, 0), val, font=pil_font)
+            max_val_w = max(max_val_w, max(0, vb[2] - vb[0]))
+
+    content_w = max_label_w + (col_gap + max_val_w if has_val else 0)
+    content_h = len(rows) * line_h + max(0, len(rows) - 1) * line_gap
+    sw = max(40 * ss, content_w + pad_x * 2)
+    sh = max(24 * ss, content_h + pad_y * 2)
+    # 保证 2x 尺寸是偶数，缩放回逻辑像素尺寸零舍入偏差
+    if sw % ss:
+        sw += 1
+    if sh % ss:
+        sh += 1
+    w_px, h_px = sw // ss, sh // ss
+
+    is_transparent = (shape == '透明')
+    # 透明模式底色 Alpha=1/255（肉眼 100% 透明，但桌面可交互时整个卡片区域都能顺畅拖动/滚轮/右键）
+    base_fill = (0, 0, 0, 1) if is_transparent else (0, 0, 0, 0)
+    im = Image.new('RGBA', (sw, sh), base_fill)
+    draw = ImageDraw.Draw(im)
+
+    if shape == '圆角':
+        rad = min(10 * ss, sw // 3, sh // 3)
+        draw.rounded_rectangle((0, 0, sw - 1, sh - 1), radius=rad, fill=(*bg_rgb, 255))
+    elif shape == '方形':
+        draw.rectangle((0, 0, sw - 1, sh - 1), fill=(*bg_rgb, 255))
+
+    val_x = pad_x + max_label_w + col_gap
+    fg_rgba = (*fg_rgb, 255)
+
+    if is_transparent:
+        # 透明文字加一层细腻柔和的半透明微阴影（绝非硬黑边或 ClearType 彩边），白底网页/深色桌面/游戏画面均清晰可读
+        lum = 0.299 * fg_rgb[0] + 0.587 * fg_rgb[1] + 0.114 * fg_rgb[2]
+        shadow_rgba = (12, 16, 28, 175) if lum >= 120 else (255, 255, 255, 190)
+        shadow_layer = Image.new('RGBA', (sw, sh), (0, 0, 0, 0))
+        sdraw = ImageDraw.Draw(shadow_layer)
+        y = pad_y
+        for label, val in rows:
+            for dx, dy in ((0, ss), (ss, ss), (0, 0)):
+                sdraw.text((pad_x + dx, y + dy), label, font=pil_font, fill=shadow_rgba)
+                if val:
+                    sdraw.text((val_x + dx, y + dy), val, font=pil_font, fill=shadow_rgba)
+            y += line_h + line_gap
+        shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=1.6 * ss))
+        im = Image.alpha_composite(im, shadow_layer)
+        draw = ImageDraw.Draw(im)
+
+    y = pad_y
+    for label, val in rows:
+        draw.text((pad_x, y), label, font=pil_font, fill=fg_rgba)
+        if val:
+            draw.text((val_x, y), val, font=pil_font, fill=fg_rgba)
+        y += line_h + line_gap
+
+    out = im.resize((w_px, h_px), Image.LANCZOS)
+    premul = out.convert('RGBa')
+    r_ch, g_ch, b_ch, a_ch = premul.split()
+    bgra = Image.merge('RGBA', (b_ch, g_ch, r_ch, a_ch)).tobytes()
+    return w_px, h_px, bgra
 
 
 class GpuTempReader:
@@ -250,7 +400,12 @@ class SystemMonitor:
         self.win = tk.Toplevel(widgets.root)
         self.win.withdraw()
         self.win.overrideredirect(True)
-        self.win.attributes('-topmost', True, '-transparentcolor', self.keycolor)
+        self._layered = bool(HAS_PIL and _find_monitor_font_path())
+        if self._layered:
+            # 逐像素 Alpha 分层模式：绝不同时设置 -transparentcolor / -alpha，避免与 UpdateLayeredWindow 冲突
+            self.win.attributes('-topmost', True)
+        else:
+            self.win.attributes('-topmost', True, '-transparentcolor', self.keycolor)
         for key in ('fg', 'bg'):
             try:
                 self.win.winfo_rgb(self.cfg[key])
@@ -261,7 +416,8 @@ class SystemMonitor:
         self.canvas.pack()
         # 工具窗口 + 不抢焦点，保证浮在游戏/全屏窗口上时不会把游戏切出去
         self.hwnd = toplevel_hwnd(self.win)
-        add_exstyle(self.hwnd, WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+        extra_bits = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | (WS_EX_LAYERED if self._layered else 0)
+        add_exstyle(self.hwnd, extra_bits)
         self.font = font.Font(family='Segoe UI', size=self.cfg['size'])
         self.canvas.bind('<ButtonPress-1>', self.press)
         self.canvas.bind('<B1-Motion>', self.drag)
@@ -273,6 +429,10 @@ class SystemMonitor:
         self.dialog = None
         self.drag_offset = None
         self._click_through = False
+        self._layered_frame = None
+        self._size = (120, 48)
+        self._pos = list(self.cfg.get('position', [0, 0]))
+        self._alpha_scale = 1.0
         self.edge_start = None
         self.edge_y = 0
         self.edge_monitor = None
@@ -287,7 +447,82 @@ class SystemMonitor:
         self.controls = {}
         widgets.cfg['monitor'] = self.cfg
 
-    def render(self):
+    def _window_size(self):
+        if self._layered and self._size[0] > 0 and self._size[1] > 0:
+            return self._size
+        return max(1, self.canvas.winfo_reqwidth()), max(1, self.canvas.winfo_reqheight())
+
+    def _commit_layered(self, opacity=None, x=None, y=None):
+        if not self._layered or not self._layered_frame or not self.hwnd:
+            return False
+        w_px, h_px, bgra = self._layered_frame
+        if opacity is None:
+            opacity = round(255 * (self.cfg['alpha'] / 100.0) * self._alpha_scale)
+        return update_layered_rgba(self.hwnd, w_px, h_px, bgra, x=x, y=y, opacity=opacity)
+
+    def _notify_pin_ui(self):
+        bar = getattr(self.widgets, 'bar', None)
+        if bar is not None and hasattr(bar, 'refresh_monitor_pin_ui'):
+            bar.refresh_monitor_pin_ui()
+
+    def is_pinned(self):
+        return bool(self.cfg.get('pinned', False))
+
+    def set_pinned(self, pinned):
+        """一键开启或关闭系统监控固定置顶（开启时自动确保全屏/游戏时保持置顶，打游戏直接可见）。"""
+        target = bool(pinned)
+        committed = self.widgets.cfg.get('monitor')
+        if not isinstance(committed, dict):
+            committed = self.cfg
+        self.cfg['pinned'] = target
+        committed['pinned'] = target
+        if target:
+            # 一键置顶默认同时启用“全屏/游戏时保持置顶”，避免打游戏仍被隐藏
+            self.cfg['over_fullscreen'] = True
+            committed['over_fullscreen'] = True
+        if 'pinned' in self.controls:
+            self.controls['pinned'].set(target)
+        if target and 'over_fullscreen' in self.controls:
+            self.controls['over_fullscreen'].set(True)
+
+        now = time.monotonic()
+        if target:
+            if not self.visible:
+                pt = cursor_pos()
+                self.show(pt.x, pt.y, now)
+            else:
+                self.sample(now)
+                self.render()
+                self.raise_()
+        else:
+            editing = bool(self.dialog and self.dialog.winfo_exists())
+            if self.visible and not editing:
+                self._hide()
+
+        self._notify_pin_ui()
+        if self.save_timer is not None:
+            self.win.after_cancel(self.save_timer)
+            self.save_timer = None
+        self.flush_save()
+        return target
+
+    def toggle_pin(self, enable=None):
+        target = (not self.is_pinned()) if enable is None else bool(enable)
+        return self.set_pinned(target)
+
+    def _hide(self):
+        if self.fade:
+            self.win.after_cancel(self.fade)
+            self.fade = None
+        self.win.withdraw()
+        self.visible = False
+        self._click_through = False
+        set_click_through(self.hwnd, False)
+        # 隐藏后清空旧采样基准，避免重新出现时第一帧算出整段隐藏期的平均假值
+        self.sampler.cpu = None
+        self.sampler.net = None
+
+    def _build_rows(self):
         cfg = self.cfg
         items = [
             ('cpu', 'CPU', cfg['cpu']),
@@ -297,11 +532,49 @@ class SystemMonitor:
             ('up', '↑', cfg['net']),
             ('ping', '延迟', cfg['ping']),
         ]
-        self.text = '\n'.join(self.readings.get(k, label + '    —') for k, label, enabled in items if enabled)
+        rows = []
+        lines = []
+        for k, label, enabled in items:
+            if not enabled:
+                continue
+            raw = self.readings.get(k, label + '    —')
+            lines.append(raw)
+            if '    ' in raw:
+                left, right = raw.split('    ', 1)
+                rows.append((left, right))
+            else:
+                rows.append((raw, ''))
+        return rows, '\n'.join(lines)
+
+    def render(self):
+        cfg = self.cfg
+        rows, text = self._build_rows()
+        self.text = text
+
+        if self._layered:
+            fg_rgb = _parse_rgb(self.win, cfg['fg'], (241, 245, 249))
+            bg_rgb = _parse_rgb(self.win, cfg['bg'], (36, 48, 64))
+            scale = max(1.0, getattr(self.widgets, 'ui_scale', 1.0))
+            frame = render_monitor_rgba(rows, cfg['size'], cfg['shape'], fg_rgb, bg_rgb, ui_scale=scale)
+            if frame is not None:
+                width, height, bgra = frame
+                size_changed = (width, height) != self._size
+                self._size = (width, height)
+                self._layered_frame = frame
+                if size_changed:
+                    self.canvas.configure(width=width, height=height)
+                if self.visible:
+                    if size_changed:
+                        self.win.geometry(f'{width}x{height}+{self._pos[0]}+{self._pos[1]}')
+                    self._commit_layered(x=self._pos[0], y=self._pos[1])
+                return
+
+        # 无 Pillow 回退：使用 Tk Canvas 绘制，并在透明模式下添加柔和对比微影避免纯白底难以辨认
         self.font.configure(size=cfg['size'])
         lines = self.text.splitlines() or ['—']
         width = max(self.font.measure(t) for t in lines) + 32
         height = len(lines) * self.font.metrics('linespace') + 24
+        self._size = (width, height)
         cv = self.canvas
         cv.configure(width=width, height=height)
         cv.delete('all')
@@ -314,21 +587,32 @@ class SystemMonitor:
             )
         elif cfg['shape'] == '方形':
             cv.create_rectangle(0, 0, width, height, fill=cfg['bg'], outline='')
+        elif cfg['shape'] == '透明':
+            fg_rgb = _parse_rgb(self.win, cfg['fg'], (241, 245, 249))
+            lum = 0.299 * fg_rgb[0] + 0.587 * fg_rgb[1] + 0.114 * fg_rgb[2]
+            shadow = '#0b0f19' if lum >= 120 else '#ffffff'
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (1, 1)):
+                cv.create_text(16 + dx, 12 + dy, anchor='nw', font=self.font, fill=shadow, text=self.text or '—')
         cv.create_text(16, 12, anchor='nw', font=self.font, fill=cfg['fg'], text=self.text or '—')
 
     def place(self, x, y):
-        w, h = self.canvas.winfo_reqwidth(), self.canvas.winfo_reqheight()
+        w_px, h_px = self._window_size()
         # 用窗口中心点查询显示器边界，避免多屏向右拖动时被主屏右边缘卡住
-        l, t, r, b = self.bounds(x + w // 2, y + h // 2, work=True)
-        x = max(l, min(x, r - w))
-        y = max(t, min(y, b - h))
-        self.win.geometry(f'+{x}+{y}')
+        l, t, r, b = self.bounds(x + w_px // 2, y + h_px // 2, work=True)
+        x = max(l, min(int(x), r - w_px))
+        y = max(t, min(int(y), b - h_px))
+        self._pos = [x, y]
+        self.win.geometry(f'{w_px}x{h_px}+{x}+{y}')
+        if self._layered and self.visible and self._layered_frame:
+            self._commit_layered(x=x, y=y)
         return [x, y]
 
     def press(self, event):
         if self._click_through:
             return
-        self.drag_offset = (event.x_root - self.win.winfo_x(), event.y_root - self.win.winfo_y())
+        wx = self._pos[0] if self._layered else self.win.winfo_x()
+        wy = self._pos[1] if self._layered else self.win.winfo_y()
+        self.drag_offset = (event.x_root - wx, event.y_root - wy)
 
     def drag(self, event):
         if self.drag_offset and not self._click_through:
@@ -357,7 +641,8 @@ class SystemMonitor:
         return 'break'
 
     def apply(self):
-        self.win.attributes('-alpha', self.cfg['alpha'] / 100)
+        if not self._layered:
+            self.win.attributes('-alpha', self.cfg['alpha'] / 100)
         self.render()
 
     def queue_save(self):
@@ -411,9 +696,12 @@ class SystemMonitor:
             d.destroy()
             self.apply()
             if accept and self.visible and 'position' not in self.cfg:
-                l, t, r, b = self.bounds(self.win.winfo_x(), self.win.winfo_y(), work=True)
-                nx = l + 5 if self.cfg['edge'] == '左' else r - self.canvas.winfo_reqwidth() - 5
-                self.place(nx, self.win.winfo_y())
+                wx, wy = self._pos if self._layered else (self.win.winfo_x(), self.win.winfo_y())
+                l, t, r, b = self.bounds(wx, wy, work=True)
+                w_px, _h_px = self._window_size()
+                nx = l + 5 if self.cfg['edge'] == '左' else r - w_px - 5
+                self.place(nx, wy)
+            self._notify_pin_ui()
             if accept:
                 if self.save_timer is not None:
                     self.win.after_cancel(self.save_timer)
@@ -432,6 +720,7 @@ class SystemMonitor:
                 variables['cpu'].set(True)
                 self.cfg['cpu'] = True
             self.apply()
+            self._notify_pin_ui()
 
         for key, title, choices in [('edge', '呼出边缘', ['左', '右']),
                                     ('shape', '背景样式', ['圆角', '方形', '透明'])]:
@@ -485,26 +774,57 @@ class SystemMonitor:
 
     def raise_(self):
         """将监控窗口保持在所有普通/无边框全屏窗口最顶层，且不抢焦点。"""
-        user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        user32.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+
+    def _needs_raise(self, foreground):
+        """判断是否被前景游戏窗口压到下方或丢失置顶样式（平时零 DWM 触碰，被压住立刻温和抬回）。"""
+        if not self.hwnd:
+            return False
+        if foreground != self._last_foreground:
+            return True
+        if not (GetWindowLongPtr(self.hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST):
+            return True
+        if foreground and foreground != self.hwnd:
+            cur = user32.GetWindow(self.hwnd, GW_HWNDPREV)
+            for _ in range(12):
+                if not cur:
+                    break
+                if cur == foreground:
+                    return True
+                cur = user32.GetWindow(cur, GW_HWNDPREV)
+        return False
 
     def show(self, x, y, now):
         self.visible = True
+        self._alpha_scale = 0.0
         self.sample(now)
         self.last_sample = self.last_inside = now
         self.render()
         l, t, r, b = self.bounds(x, y, work=True)
-        pos = self.cfg.get('position', (l + 5 if self.cfg['edge'] == '左' else r - self.canvas.winfo_reqwidth() - 5, y))
-        self.place(*pos)
-        self.win.attributes('-alpha', 0)
-        self.win.deiconify()
-        self.raise_()
+        w_px, _h_px = self._window_size()
+        pos = self.cfg.get('position', (l + 5 if self.cfg['edge'] == '左' else r - w_px - 5, y))
+        px, py = self.place(*pos)
+        if self._layered:
+            self._commit_layered(opacity=0, x=px, y=py)
+            self.win.deiconify()
+            user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
+            self.raise_()
+        else:
+            self.win.attributes('-alpha', 0)
+            self.win.deiconify()
+            self.raise_()
 
         def brighten(step):
             if not self.visible or not self.win.winfo_exists():
                 self.fade = None
                 return
+            self._alpha_scale = step / 5.0
             try:
-                self.win.attributes('-alpha', self.cfg['alpha'] / 100 * step / 5)
+                if self._layered:
+                    self._commit_layered(x=self._pos[0], y=self._pos[1])
+                else:
+                    self.win.attributes('-alpha', self.cfg['alpha'] / 100 * self._alpha_scale)
             except tk.TclError:
                 self.fade = None
                 return
@@ -512,6 +832,7 @@ class SystemMonitor:
                 self.fade = self.win.after(20, brighten, step + 1)
             else:
                 self.fade = None
+                self._alpha_scale = 1.0
                 self.raise_()
 
         if self.fade:
@@ -559,27 +880,18 @@ class SystemMonitor:
                 self._click_through = want_passthrough
                 set_click_through(self.hwnd, want_passthrough)
 
-            wx, wy = self.win.winfo_x(), self.win.winfo_y()
-            in_rect = wx <= x < wx + self.win.winfo_width() and wy <= y < wy + self.win.winfo_height()
+            wx, wy = (self._pos[0], self._pos[1]) if self._layered else (self.win.winfo_x(), self.win.winfo_y())
+            w_px, h_px = self._window_size()
+            in_rect = wx <= x < wx + w_px and wy <= y < wy + h_px
             inside = in_rect and (not blocked)
             if inside or edge or editing or self.drag_offset:
                 self.last_inside = now
             if not editing and (hide_blocked or (not self.cfg['pinned'] and now - self.last_inside >= 1.5)):
-                if self.fade:
-                    self.win.after_cancel(self.fade)
-                    self.fade = None
-                self.win.withdraw()
-                self.visible = False
-                self._click_through = False
-                set_click_through(self.hwnd, False)
-                # 隐藏后清空旧采样基准，避免重新出现时第一帧算出整段隐藏期的平均假值
-                self.sampler.cpu = None
-                self.sampler.net = None
+                self._hide()
             elif now - self.last_sample >= 1:
                 self.sample(now)
                 self.render()
-            if self.visible and self.cfg['over_fullscreen'] and foreground != self._last_foreground:
-                # 仅在前台窗口切换时重新置顶，避免每 150ms 无谓触碰 DWM 合成树
+            if self.visible and self.cfg['over_fullscreen'] and self._needs_raise(foreground):
                 self._last_foreground = foreground
                 self.raise_()
         return edge and self.cfg['edge'] == '右'

@@ -17,6 +17,7 @@ IDM_OPEN = 2001
 IDM_QUIT = 2002
 IDM_THEME = 2003
 IDM_GUARD = 2004
+IDM_MONITOR_PIN = 2005
 HOTKEY_ICONS = 1
 HOTKEY_THEME = 2
 TRAY_ICON_ID = 1
@@ -39,6 +40,8 @@ class TrayIcon:
         self.on_theme = None
         self.get_focus_guard = None
         self.on_toggle_focus_guard = None
+        self.get_monitor_pinned = None
+        self.on_toggle_monitor_pin = None
         self.on_hotkey_icons = None
         self.on_hotkey_theme = None
         self.hotkeys_registered = set()
@@ -131,6 +134,10 @@ class TrayIcon:
             checked = bool(self.get_focus_guard()) if self.get_focus_guard else True
             flags = MF_STRING | (MF_CHECKED if checked else 0)
             user32.AppendMenuW(menu, flags, IDM_GUARD, '游戏 / 窗口防误触')
+        if self.on_toggle_monitor_pin:
+            pinned = bool(self.get_monitor_pinned()) if self.get_monitor_pinned else False
+            flags = MF_STRING | (MF_CHECKED if pinned else 0)
+            user32.AppendMenuW(menu, flags, IDM_MONITOR_PIN, '📌 置顶系统监控（游戏可用）')
         if self.on_theme:
             try:
                 from theme_switch import is_dark
@@ -156,6 +163,8 @@ class TrayIcon:
             self._on_open()
         elif cmd == IDM_GUARD and self.on_toggle_focus_guard:
             self.on_toggle_focus_guard()
+        elif cmd == IDM_MONITOR_PIN and self.on_toggle_monitor_pin:
+            self.on_toggle_monitor_pin()
         elif cmd == IDM_THEME and self.on_theme:
             self.on_theme()
         elif cmd == IDM_QUIT:

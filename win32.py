@@ -41,6 +41,11 @@ WS_EX_TRANSPARENT = 0x00000020       # 鼠标点击穿透（直达下层游戏�
 WS_EX_TOOLWINDOW = 0x00000080        # 不在任务栏 / Alt+Tab 中出现
 WS_EX_LAYERED = 0x00080000           # 分层窗口（配合穿透与透明色键）
 WS_EX_NOACTIVATE = 0x08000000        # 点击不抢焦点
+ULW_ALPHA = 0x00000002               # UpdateLayeredWindow 逐像素 Alpha 合成
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01
+DIB_RGB_COLORS = 0
+BI_RGB = 0
 DWMWA_EXTENDED_FRAME_BOUNDS = 9      # DWM 真实可见窗口边界（不含隐形阴影）
 HWND_TOP = 0
 HWND_TOPMOST = -1
@@ -173,6 +178,31 @@ class ICONINFO(ctypes.Structure):
                 ('hbmMask', wintypes.HBITMAP), ('hbmColor', wintypes.HBITMAP)]
 
 
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [
+        ('BlendOp', ctypes.c_ubyte),
+        ('BlendFlags', ctypes.c_ubyte),
+        ('SourceConstantAlpha', ctypes.c_ubyte),
+        ('AlphaFormat', ctypes.c_ubyte),
+    ]
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ('biSize', wintypes.DWORD),
+        ('biWidth', wintypes.LONG),
+        ('biHeight', wintypes.LONG),
+        ('biPlanes', wintypes.WORD),
+        ('biBitCount', wintypes.WORD),
+        ('biCompression', wintypes.DWORD),
+        ('biSizeImage', wintypes.DWORD),
+        ('biXPelsPerMeter', wintypes.LONG),
+        ('biYPelsPerMeter', wintypes.LONG),
+        ('biClrUsed', wintypes.DWORD),
+        ('biClrImportant', wintypes.DWORD),
+    ]
+
+
 class VARIANT(ctypes.Structure):
     # VARIANT 的联合体最大成员是两个指针组成的记录
     _fields_ = [('vt', ctypes.c_ushort), ('reserved', ctypes.c_ushort * 3),
@@ -286,6 +316,9 @@ _sig(user32.EmptyClipboard, BOOL)
 _sig(user32.SetClipboardData, H, UINT, H)
 _sig(user32.CloseClipboard, BOOL)
 _sig(user32.RegisterClipboardFormatW, UINT, wintypes.LPCWSTR)
+_sig(user32.UpdateLayeredWindow, BOOL, HWND, wintypes.HDC, ctypes.POINTER(POINT),
+     ctypes.POINTER(wintypes.SIZE), wintypes.HDC, ctypes.POINTER(POINT),
+     wintypes.COLORREF, ctypes.POINTER(BLENDFUNCTION), DWORD)
 
 try:
     GetWindowLongPtr = _sig(user32.GetWindowLongPtrW, LONG_PTR, HWND, INT)
@@ -318,6 +351,8 @@ _sig(gdi32.GetStockObject, wintypes.HGDIOBJ, INT)
 _sig(gdi32.CreateCompatibleDC, wintypes.HDC, wintypes.HDC)
 _sig(gdi32.CreateCompatibleBitmap, wintypes.HBITMAP, wintypes.HDC, INT, INT)
 _sig(gdi32.CreateBitmap, wintypes.HBITMAP, INT, INT, UINT, UINT, wintypes.LPVOID)
+_sig(gdi32.CreateDIBSection, wintypes.HBITMAP, wintypes.HDC, ctypes.POINTER(BITMAPINFOHEADER),
+     UINT, ctypes.POINTER(ctypes.c_void_p), H, DWORD)
 _sig(gdi32.SelectObject, wintypes.HGDIOBJ, wintypes.HDC, wintypes.HGDIOBJ)
 _sig(gdi32.CreateSolidBrush, wintypes.HBRUSH, wintypes.COLORREF)
 _sig(gdi32.RoundRect, BOOL, wintypes.HDC, INT, INT, INT, INT, INT, INT)
@@ -368,6 +403,63 @@ def toplevel_hwnd(widget):
 
 def add_exstyle(hwnd, bits):
     SetWindowLongPtr(hwnd, GWL_EXSTYLE, GetWindowLongPtr(hwnd, GWL_EXSTYLE) | bits)
+
+
+def update_layered_rgba(hwnd, width, height, premul_bgra, x=None, y=None, opacity=255):
+    """将 32 位预乘 Alpha 的 BGRA 像素帧直接推送到分层窗口（真逐像素平滑透明，零色键黑边/彩边）。"""
+    width = int(width)
+    height = int(height)
+    if not hwnd or width <= 0 or height <= 0 or len(premul_bgra) != width * height * 4:
+        return False
+
+    cur_ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE)
+    if not (cur_ex & WS_EX_LAYERED):
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, cur_ex | WS_EX_LAYERED)
+
+    screen_dc = user32.GetDC(None)
+    if not screen_dc:
+        return False
+    mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+    if not mem_dc:
+        user32.ReleaseDC(None, screen_dc)
+        return False
+
+    hbmp = None
+    old_bmp = None
+    try:
+        bmi = BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bmi.biWidth = width
+        bmi.biHeight = -height       # 负高度：自顶向下扫描行，与 Pillow 图像内存顺序一致
+        bmi.biPlanes = 1
+        bmi.biBitCount = 32
+        bmi.biCompression = BI_RGB
+        bits_ptr = ctypes.c_void_p()
+        hbmp = gdi32.CreateDIBSection(
+            screen_dc, ctypes.byref(bmi), DIB_RGB_COLORS, ctypes.byref(bits_ptr), None, 0,
+        )
+        if not hbmp or not bits_ptr.value:
+            return False
+        ctypes.memmove(bits_ptr.value, premul_bgra, len(premul_bgra))
+        old_bmp = gdi32.SelectObject(mem_dc, hbmp)
+
+        pt_src = POINT(0, 0)
+        sz = wintypes.SIZE(width, height)
+        pt_dst = POINT(int(x), int(y)) if (x is not None and y is not None) else None
+        blend = BLENDFUNCTION(AC_SRC_OVER, 0, max(0, min(255, int(opacity))), AC_SRC_ALPHA)
+        return bool(user32.UpdateLayeredWindow(
+            hwnd, screen_dc,
+            ctypes.byref(pt_dst) if pt_dst is not None else None,
+            ctypes.byref(sz), mem_dc, ctypes.byref(pt_src),
+            0, ctypes.byref(blend), ULW_ALPHA,
+        ))
+    finally:
+        if old_bmp:
+            gdi32.SelectObject(mem_dc, old_bmp)
+        if hbmp:
+            gdi32.DeleteObject(hbmp)
+        gdi32.DeleteDC(mem_dc)
+        user32.ReleaseDC(None, screen_dc)
 
 
 def set_click_through(hwnd, enabled):

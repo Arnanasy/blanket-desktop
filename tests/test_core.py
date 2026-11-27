@@ -911,6 +911,143 @@ class TestClockExtrasAndLayout(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_monitor_layered_render_pin_toggle_game_raise_and_checkmark_style(self):
+        """实测本次 3 项升级：真逐像素透明监控渲染、全软件圆角 ✓/□ 复选框样式、快捷面板与托盘一键置顶及游戏重申置顶。"""
+        import sys_monitor as sm
+        import tray_icon as ti
+        import ui_helpers as uh
+
+        # 1. 真逐像素透明渲染（透明 / 圆角 / 方形 / 空数据 / 中文与符号）
+        if sm.HAS_PIL and sm._find_monitor_font_path():
+            rows = [('CPU', '4%'), ('内存', '59%'), ('温度', '49°C'), ('↓', '1.2 MiB/s'), ('延迟', '46 ms')]
+            for shape in ('透明', '圆角', '方形'):
+                frame = sm.render_monitor_rgba(rows, 19, shape, (238, 213, 251), (36, 48, 64), ui_scale=1.25)
+                self.assertIsNotNone(frame)
+                w_px, h_px, bgra = frame
+                self.assertGreater(w_px, 60)
+                self.assertGreater(h_px, 40)
+                self.assertEqual(len(bgra), w_px * h_px * 4)
+                if shape == '透明':
+                    # 左上角背景像素应为肉眼不可见的 alpha=1 占位（无黑边/绿幕残渣），且预乘 RGB 为 0
+                    self.assertEqual((bgra[0], bgra[1], bgra[2], bgra[3]), (0, 0, 0, 1))
+                elif shape == '圆角':
+                    # 圆角矩形最外角应完全透明（alpha=0），无黑色锯齿
+                    self.assertEqual(bgra[3], 0)
+            # 空列表兜底不崩
+            empty_frame = sm.render_monitor_rgba([], 15, '透明', (241, 245, 249), (36, 48, 64))
+            self.assertIsNotNone(empty_frame)
+
+        # 2. 托盘菜单包含“置顶系统监控”且选中后触发回调
+        appended = []
+        toggled_pin = []
+        tray = ti.TrayIcon(100, lambda: None, lambda: None, lambda: None)
+        tray._proc_ref = object()
+        tray.get_monitor_pinned = lambda: True
+        tray.on_toggle_monitor_pin = lambda: toggled_pin.append(True)
+        with mock.patch.object(ti.user32, 'CreatePopupMenu', return_value=500), \
+             mock.patch.object(ti.user32, 'AppendMenuW', side_effect=lambda m, f, cmd, txt: appended.append((f, cmd, txt)) or 1), \
+             mock.patch.object(ti.user32, 'SetForegroundWindow', return_value=1), \
+             mock.patch.object(ti.user32, 'TrackPopupMenu', return_value=ti.IDM_MONITOR_PIN), \
+             mock.patch.object(ti.user32, 'PostMessageW', return_value=1), \
+             mock.patch.object(ti.user32, 'DestroyMenu', return_value=1):
+            tray._show_menu()
+        pin_entries = [e for e in appended if e[1] == ti.IDM_MONITOR_PIN]
+        self.assertEqual(len(pin_entries), 1)
+        self.assertTrue(pin_entries[0][0] & ti.MF_CHECKED)
+        self.assertEqual(toggled_pin, [True])
+
+        if os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS'):
+            return
+
+        import tkinter as tk
+        from tkinter import ttk
+        import launcher_bar as lb
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f'当前环境无法初始化 Tk 窗口：{exc}')
+        root.withdraw()
+        try:
+            # 3. 全局 clam 复选框替换为圆角 ✓ / □（浅色/深色反复切换不报 Duplicate element，无 Pillow 回退也可用）
+            style = ttk.Style(root)
+            style.theme_use('clam')
+            e_light = uh.install_checkmark_style(root, style, dark=False, ui_scale=1.25)
+            e_dark = uh.install_checkmark_style(root, style, dark=True, ui_scale=1.25)
+            e_light2 = uh.install_checkmark_style(root, style, dark=False, ui_scale=1.25)
+            self.assertEqual(e_light, e_light2)
+            self.assertNotEqual(e_light, e_dark)
+            self.assertIn(e_light, str(style.layout('TCheckbutton')))
+            # 模拟无 Pillow 环境直接构造兜底图标
+            with mock.patch.object(uh, '_HAS_PIL', False):
+                fb_on = uh._make_checkbox_image(root, 16, True, '#2563EB', '#2563EB', '#FFFFFF')
+                fb_off = uh._make_checkbox_image(root, 16, False, '#94A3B8', '#FFFFFF', '#FFFFFF')
+                self.assertGreater(fb_on.width(), 16)
+                self.assertEqual(fb_off.height(), 16)
+
+            # 4. 真实 Tk + Win32 UpdateLayeredWindow 监控置顶联动与游戏 Z-order 检查
+            class _FakeThemeBtn:
+                dark = False
+
+            class _FakeApp:
+                _quitting = False
+                def toggle_theme(self): pass
+                def open_settings(self): pass
+                def discard_mouse(self): pass
+
+            class _FakeWidgets:
+                def __init__(self, r):
+                    self.root = r
+                    self.app = _FakeApp()
+                    self.ui_scale = 1.25
+                    self.theme_button = _FakeThemeBtn()
+                    self.cfg = {'monitor': {'pinned': False, 'over_fullscreen': False, 'shape': '透明', 'fg': '#eed5fb'}}
+                    self.countdown = None
+                    self.bar = None
+                    self.monitor = None
+                    self.saved = 0
+                def settings(self): pass
+                def save(self): self.saved += 1
+                def queue_save(self): pass
+                def start_countdown(self, m, l): pass
+                def cancel_countdown(self): pass
+                def current_countdown_text(self, now=None): return ''
+
+            fw = _FakeWidgets(root)
+            fw.bar = lb.LauncherBar(fw, fw.cfg)
+            fw.monitor = sm.SystemMonitor(fw, lambda x, y, work=True: (0, 0, 1920, 1040))
+            self.assertIn('监控置顶', fw.bar.monitor_pin_btn.cget('text'))
+
+            # 点一键置顶：开启 pinned + 自动确保 over_fullscreen=True + 立即显示且分层推送成功 + 快捷开关变已置顶
+            fw.bar._toggle_monitor_pin()
+            self.assertTrue(fw.monitor.is_pinned())
+            self.assertTrue(fw.monitor.cfg['over_fullscreen'])
+            self.assertTrue(fw.monitor.visible)
+            self.assertIn('已置顶', fw.bar.monitor_pin_btn.cget('text'))
+            if fw.monitor._layered:
+                self.assertTrue(fw.monitor._commit_layered(x=fw.monitor._pos[0], y=fw.monitor._pos[1]))
+
+            # 模拟全屏游戏窗口 (hwnd=8888) 把监控压在下面：_needs_raise 应立即检出返回 True
+            fw.monitor._last_foreground = 8888
+            with mock.patch.object(sm, 'GetWindowLongPtr', return_value=sm.WS_EX_TOPMOST), \
+                 mock.patch.object(sm.user32, 'GetWindow', side_effect=[7777, 8888]):
+                self.assertTrue(fw.monitor._needs_raise(8888))
+            # 监控已在最顶层（GW_HWNDPREV 为 0）：不无谓触发 raise_
+            with mock.patch.object(sm, 'GetWindowLongPtr', return_value=sm.WS_EX_TOPMOST), \
+                 mock.patch.object(sm.user32, 'GetWindow', return_value=0):
+                self.assertFalse(fw.monitor._needs_raise(8888))
+
+            # 再次点击取消置顶：恢复隐藏且按钮恢复未置顶文字
+            fw.bar._toggle_monitor_pin()
+            self.assertFalse(fw.monitor.is_pinned())
+            self.assertFalse(fw.monitor.visible)
+            self.assertIn('监控置顶', fw.bar.monitor_pin_btn.cget('text'))
+
+            fw.monitor.cancel_save()
+            fw.bar.close()
+        finally:
+            root.destroy()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -114,6 +114,7 @@ class LauncherBar:
         self.edge_monitor = None
         self.theme_item = None
         self.awake_btn = None
+        self.monitor_pin_btn = None
         self.countdown_label = None
         self.files_box = None
         self.scroll_canvas = None
@@ -276,6 +277,17 @@ class LauncherBar:
         dk_btn = self._pill_btn(grid, '🧰 本地工具箱', self._open_deskkit, fg=acc)
         dk_btn.grid(row=1, column=1, sticky='ew', padx=(3, 0))
         dk_btn.bind('<Button-3>', lambda _e: self._pick_deskkit_path())
+
+        mon_pinned = self._is_monitor_pinned()
+        self.monitor_pin_btn = self._pill_btn(
+            grid,
+            '📌 监控已置顶（点取消）' if mon_pinned else '📌 监控置顶（游戏可用）',
+            self._toggle_monitor_pin,
+            bg=GREEN_ACTIVE if mon_pinned else ibg,
+            fg='white' if mon_pinned else fg,
+        )
+        self.monitor_pin_btn.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(4, 0))
+        self.monitor_pin_btn.bind('<Button-3>', lambda _e: self._open_monitor_settings())
 
         # 2. 独立可拖动番茄钟 / 倒计时（附带快捷外观与提示语设置入口）
         cd_widget = getattr(self.widgets, 'countdown', None)
@@ -461,6 +473,37 @@ class LauncherBar:
         self.awake.toggle()
         self.render()
         self._refresh_if_visible()
+
+    def _is_monitor_pinned(self):
+        mon = getattr(self.widgets, 'monitor', None)
+        if mon is not None and hasattr(mon, 'is_pinned'):
+            return bool(mon.is_pinned())
+        saved = self.widgets.cfg.get('monitor', {}) if isinstance(getattr(self.widgets, 'cfg', None), dict) else {}
+        return bool(saved.get('pinned', False)) if isinstance(saved, dict) else False
+
+    def _toggle_monitor_pin(self):
+        mon = getattr(self.widgets, 'monitor', None)
+        if mon is not None and hasattr(mon, 'toggle_pin'):
+            mon.toggle_pin()
+        else:
+            self.refresh_monitor_pin_ui()
+
+    def _open_monitor_settings(self):
+        mon = getattr(self.widgets, 'monitor', None)
+        if mon is not None and hasattr(mon, 'settings'):
+            self._dismiss()
+            mon.settings()
+
+    def refresh_monitor_pin_ui(self):
+        """同步快捷开关面板中的「监控置顶」按钮文字与高亮状态。"""
+        btn = self.monitor_pin_btn
+        if btn is not None and btn.winfo_exists():
+            pinned = self._is_monitor_pinned()
+            btn.configure(
+                text='📌 监控已置顶（点取消）' if pinned else '📌 监控置顶（游戏可用）',
+                bg=GREEN_ACTIVE if pinned else self._c('item_bg'),
+                fg='white' if pinned else self._c('fg'),
+            )
 
     def _sleep_screen(self):
         self.win.withdraw()
