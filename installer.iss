@@ -1,6 +1,6 @@
 ; Blanket Windows 标准安装包脚本（Inno Setup 6）
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.2"
+  #define MyAppVersion "1.1.0"
 #endif
 
 [Setup]
