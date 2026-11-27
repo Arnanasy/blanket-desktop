@@ -819,12 +819,17 @@ class TestClockExtrasAndLayout(unittest.TestCase):
 
     def test_real_tk_widgets_scroll_footer_countdown_preview_and_monitor_wheel(self):
         """在隐藏 Tk 根窗口沙盒中实测：抽屉超高自动滚动且底部三按钮不裁切、番茄钟试看优先级与长句收拢、系统监控 Shift+滚轮。"""
+        if os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS'):
+            self.skipTest('云端无交互式桌面环境跳过真实 Tk 窗口渲染测试（本机完整执行）')
         import tkinter as tk
         import countdown_widget as cw
         import launcher_bar as lb
         import sys_monitor as sm
 
-        root = tk.Tk()
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f'当前环境无法初始化 Tk 窗口：{exc}')
         root.withdraw()
         try:
             class _FakeThemeBtn:
