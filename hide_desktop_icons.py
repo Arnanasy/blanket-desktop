@@ -27,9 +27,10 @@ from desktop_windows import (DesktopClick, get_cursor, icons_visible, set_icons_
                              in_hotzone, input_idle_seconds, invalidate_cache)
 from preferences import load_config, save_config, autostart_enabled, set_autostart, repair_autostart
 from tray_icon import TrayIcon, HOTKEY_ICONS, HOTKEY_THEME
-from win32 import (kernel32, wtsapi32, toplevel_hwnd, key_down, ERROR_ALREADY_EXISTS,
-                   EVENT_MODIFY_STATE, WAIT_OBJECT_0, NOTIFY_FOR_THIS_SESSION,
-                   VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_CONTROL, VK_MENU, VK_H, VK_T)
+from win32 import (user32, kernel32, wtsapi32, toplevel_hwnd, key_down, class_name,
+                   ERROR_ALREADY_EXISTS, EVENT_MODIFY_STATE, WAIT_OBJECT_0,
+                   NOTIFY_FOR_THIS_SESSION, VK_LBUTTON, VK_RBUTTON, VK_MBUTTON,
+                   VK_CONTROL, VK_MENU, VK_H, VK_T)
 
 # 单实例与“双击快捷方式唤起主窗口”的跨进程内核对象（兼容旧版运行实例唤起）
 MUTEX_NAME = 'Local\\Blanket_SingleInstance'
@@ -76,6 +77,7 @@ class App:
         self.cfg = load_config()
         self._show_event = show_event
         # 启动时要恢复的图标状态必须先取出来：恢复完成前 refresh_ui 不得覆盖它
+        self._initial_visible = icons_visible()
         self._restore_target = self.cfg.get('last_visible')
         self._restoring = True
         self._ui_state = 'unset'
@@ -443,10 +445,11 @@ class App:
         self.widgets.save()          # 会一并保存 self.cfg
         self.widgets.worker.shutdown(wait=False, cancel_futures=True)
         wtsapi32.WTSUnRegisterSessionNotification(self.tray.hwnd)
-        # 退出前确保桌面图标恢复显示；仅在确认恢复成功后才通知守护进程撤退，
-        # 若资源管理器暂时无响应或恢复失败，留给守护进程在管道 EOF 后继续重试兜底
-        restored = state is True
-        if state is False:
+        # 退出前仅当启动时桌面图标原本是显示的（而非用户在 Windows 里本来就关掉了图标）时，才恢复显示；
+        # 仅在确认无需恢复或恢复成功后才通知守护进程撤退，否则留给守护进程在管道 EOF 后重试兜底
+        need_restore = (state is False) and (self._initial_visible is not False)
+        restored = not need_restore
+        if need_restore:
             restored = bool(set_icons_visible(True) and icons_visible() is True)
         if self.recovery_guard:
             try:
@@ -514,7 +517,10 @@ class App:
             entered = in_zone and not self._in_zone
             self._in_zone = in_zone
             if entered:
-                self._ensure_shown()
+                fg = user32.GetForegroundWindow()
+                fg_cls = class_name(fg)
+                if not self.widgets.fullscreen_active(fg, fg_cls) and not self.widgets.guard_active:
+                    self._ensure_shown()
             elif not in_zone and icons_visible():
                 # 图标显示中：仅当鼠标静止、无操作超过设定时间才隐藏（按住鼠标拖拽图标期间持续刷新活动时间）
                 if any(key_down(key) for key in (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON)):

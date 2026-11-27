@@ -783,6 +783,20 @@ class TestClockExtrasAndLayout(unittest.TestCase):
             self.assertEqual(win32._desktop_insert_after(9999), 2000)
             # 自身已在桌面正上方 -> 返回 None 保持原位
             self.assertIsNone(win32._desktop_insert_after(2000))
+            # 即使 on_desktop=True 也不抬到 HWND_TOP，避免压住半屏普通窗口
+            with mock.patch.object(win32.user32, 'IsIconic', return_value=False), \
+                 mock.patch.object(win32.user32, 'SetWindowPos') as swp:
+                win32.place_on_desktop(9999, 10, 20, on_desktop=True)
+                self.assertEqual(swp.call_args[0][1], 2000)
+
+        # 7b. SMTC 启动失败时按退避冷却，避免每 60ms 重建线程
+        import media_widget as mw
+        smtc_w = mw._SmtcWorker()
+        smtc_w._retry_after = time.monotonic() + 20.0
+        with mock.patch.object(mw, 'HAS_WINRT', True), \
+             mock.patch.object(mw, 'Thread') as smtc_th:
+            smtc_w.start()
+            smtc_th.assert_not_called()
 
         # 8. 歌词断网异常时不写入永久空缓存，正常无歌词时才缓存空列表
         dummy_overlay = lw.LyricsOverlay.__new__(lw.LyricsOverlay)

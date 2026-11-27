@@ -150,9 +150,13 @@ class _SmtcWorker:
         self._last_thumb = None
         self._thumb_attempts = 0
         self._thread = None
+        self._fail_streak = 0
+        self._retry_after = 0.0
 
     def start(self):
         if not HAS_WINRT or (self._thread is not None and self._thread.is_alive()):
+            return
+        if time.monotonic() < self._retry_after:
             return
         stop_ev = Event()
         self._stop = stop_ev
@@ -162,6 +166,8 @@ class _SmtcWorker:
     def stop(self):
         self._stop.set()
         self._thread = None
+        self._fail_streak = 0
+        self._retry_after = 0.0
         self._state = _empty_state()
         self._last_thumb_key = None
         self._last_thumb = None
@@ -195,7 +201,11 @@ class _SmtcWorker:
         try:
             loop.run_until_complete(self._loop(stop_ev))
         except Exception:
-            log.debug('SMTC 轮询线程退出', exc_info=True)
+            # request_async 等启动期持续失败时指数退避冷却（5s→10s→20s→30s），防止每 60ms 反复重建线程
+            self._fail_streak = min(self._fail_streak + 1, 6)
+            backoff = min(30.0, 5.0 * (2 ** (self._fail_streak - 1)))
+            self._retry_after = time.monotonic() + backoff
+            log.debug('SMTC 轮询线程退出，%.0f 秒后重试', backoff, exc_info=True)
         finally:
             loop.close()
 
@@ -203,12 +213,12 @@ class _SmtcWorker:
         if ref is None:
             return None
         try:
-            stream = await ref.open_read_async()
+            stream = await asyncio.wait_for(ref.open_read_async(), timeout=4.0)
             size = int(stream.size)
             if size <= 0 or size > 4 * 1024 * 1024:
                 return None
             reader = _DataReader(stream)
-            await reader.load_async(size)
+            await asyncio.wait_for(reader.load_async(size), timeout=4.0)
             buf = bytearray(size)
             reader.read_bytes(buf)
             return bytes(buf)
@@ -254,7 +264,7 @@ class _SmtcWorker:
                 self._version += 1
             return
 
-        info = await session.try_get_media_properties_async()
+        info = await asyncio.wait_for(session.try_get_media_properties_async(), timeout=4.0)
         title = (info.title or '').strip() if info else ''
         artist = (info.artist or '').strip() if info else ''
         if not title and not artist:
@@ -295,17 +305,19 @@ class _SmtcWorker:
                 continue
             try:
                 if action == 'toggle':
-                    await session.try_toggle_play_pause_async()
+                    await asyncio.wait_for(session.try_toggle_play_pause_async(), timeout=4.0)
                 elif action == 'next':
-                    await session.try_skip_next_async()
+                    await asyncio.wait_for(session.try_skip_next_async(), timeout=4.0)
                 elif action == 'prev':
-                    await session.try_skip_previous_async()
+                    await asyncio.wait_for(session.try_skip_previous_async(), timeout=4.0)
                 elif action == 'seek' and arg is not None:
                     sec = max(0.0, float(arg))
                     dur = self._state.get('duration', 0.0)
                     if dur > 0:
                         sec = min(dur, sec)
-                    await session.try_change_playback_position_async(int(sec * 10_000_000))
+                    await asyncio.wait_for(
+                        session.try_change_playback_position_async(int(sec * 10_000_000)), timeout=4.0
+                    )
                     self._state = dict(self._state, pos_base=sec, pos_at=time.monotonic())
             except Exception:
                 log.debug('SMTC 控制指令失败: %s', action, exc_info=True)
@@ -313,7 +325,9 @@ class _SmtcWorker:
     async def _loop(self, stop_ev=None):
         if stop_ev is None:
             stop_ev = self._stop
-        mgr = await _SmtcManager.request_async()
+        mgr = await asyncio.wait_for(_SmtcManager.request_async(), timeout=5.0)
+        self._fail_streak = 0
+        self._retry_after = 0.0
         while not stop_ev.is_set():
             try:
                 await self._drain_cmds(mgr)

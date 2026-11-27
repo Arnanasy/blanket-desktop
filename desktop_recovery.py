@@ -40,7 +40,6 @@ def _log_recovery_failure(last_state):
 
 def recover_icons():
     from desktop_windows import icons_visible, set_icons_visible
-    from preferences import load_config, save_config
 
     last_state = None
     for _ in range(30):
@@ -49,9 +48,7 @@ def recover_icons():
         if state is False:
             set_icons_visible(True)
         if icons_visible() is True:
-            config = load_config()
-            config['last_visible'] = True
-            save_config(config)
+            # 异常恢复仅保证桌面图标回到可见，不覆盖用户 config.json 里记住的 last_visible 偏好
             return
         time.sleep(0.5)
     _log_recovery_failure(last_state)

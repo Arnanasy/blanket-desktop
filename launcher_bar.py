@@ -581,8 +581,11 @@ class LauncherBar:
     # ------------------------------------------------------------ 文件与分组操作
     def _copy_file_item(self, path_str, btn_widget):
         if not copy_file_to_clipboard(path_str, self.hwnd):
-            self._show_error(f'无法复制文件（可能已被移动或删除）：\n{path_str}')
-            self._refresh_recent_files(force=True)
+            if not os.path.exists(path_str):
+                self._show_error(f'无法复制文件（文件已被移动或删除）：\n{path_str}')
+                self._refresh_recent_files(force=True)
+            else:
+                self._show_error('系统剪贴板正被其他软件占用，请稍后再试')
             return
         if btn_widget and btn_widget.winfo_exists():
             btn_widget.configure(text='✓ 已复制', bg=GREEN_ACTIVE, fg='white')
@@ -593,8 +596,11 @@ class LauncherBar:
 
     def _copy_path_item(self, path_str, btn_widget):
         if not copy_path_to_clipboard(path_str, self.hwnd):
-            self._show_error(f'无法复制路径（文件可能已被移动或删除）：\n{path_str}')
-            self._refresh_recent_files(force=True)
+            if not os.path.exists(path_str):
+                self._show_error(f'无法复制路径（文件已被移动或删除）：\n{path_str}')
+                self._refresh_recent_files(force=True)
+            else:
+                self._show_error('系统剪贴板正被其他软件占用，请稍后再试')
             return
         if btn_widget and btn_widget.winfo_exists():
             btn_widget.configure(text='✓ 路径', bg=GREEN_ACTIVE, fg='white')

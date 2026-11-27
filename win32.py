@@ -438,11 +438,10 @@ def place_on_desktop(hwnd, x=None, y=None, on_desktop=False, show=False):
         x, y = 0, 0
     if show:
         flags |= SWP_SHOWWINDOW
-    if on_desktop:
-        z = HWND_TOP
-    else:
-        z = _desktop_insert_after(hwnd)
-        if z is None:
-            flags |= SWP_NOZORDER
-            z = HWND_BOTTOM
+    # 无论当前焦点是否在桌面，始终插在桌面容器（含动态壁纸）紧上方、普通软件窗口之下，
+    # 避免半屏窗口旁点击桌面时挂件抬到 HWND_TOP 遮挡普通软件并吃掉点击。
+    z = _desktop_insert_after(hwnd)
+    if z is None:
+        flags |= SWP_NOZORDER
+        z = HWND_BOTTOM
     user32.SetWindowPos(hwnd, z, int(x), int(y), 0, 0, flags)

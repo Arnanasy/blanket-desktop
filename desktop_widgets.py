@@ -206,10 +206,16 @@ class Widgets:
 
     @property
     def guard_active(self):
-        """是否处于游戏 / 窗口防误触锁定态。"""
+        """是否处于游戏 / 窗口防误触锁定态（实时校验当前前台句柄，避免从其他软件切回桌面时首击被 60ms 缓存吞掉）。"""
         focus_var = getattr(self.app, 'focus_guard_var', None)
         enabled = bool(focus_var.get()) if focus_var is not None else True
-        return enabled and self._external_active
+        if not enabled or not self._external_active:
+            return False
+        fg = user32.GetForegroundWindow()
+        if fg and class_name(fg) in ('Progman', 'WorkerW'):
+            self._external_active = False
+            return False
+        return True
 
     @property
     def timer_end(self):
