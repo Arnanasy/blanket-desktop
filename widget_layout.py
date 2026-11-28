@@ -63,6 +63,31 @@ def resolve_anchor(anchor, fallback_pos, width, height, bounds_fn=None, margin=0
                               probe_pt=(fx + min(w, 120) // 2, fy + min(h, 60) // 2))
 
 
+def retarget_anchor_to_rect(anchor, fallback_pos, width, height, target_rect, margin=8):
+    """将已有锚点或位置等比例迁移到指定显示器工作区矩形，返回 (new_pos, new_anchor)。"""
+    l, t, r, b = (int(v) for v in target_rect)
+    w = max(1, int(width))
+    h = max(1, int(height))
+    if isinstance(anchor, dict) and _is_number(anchor.get('rx')) and _is_number(anchor.get('ry')):
+        rx = max(0.0, min(1.0, float(anchor['rx'])))
+        ry = max(0.0, min(1.0, float(anchor['ry'])))
+    else:
+        fx, fy = int(fallback_pos[0]), int(fallback_pos[1])
+        ol, ot, or_, ob = bounds(fx + w // 2, fy + h // 2, work=True)
+        rx = max(0.0, min(1.0, (fx - ol) / max(1, (or_ - ol) - w)))
+        ry = max(0.0, min(1.0, (fy - ot) / max(1, (ob - ot) - h)))
+    span_x = max(0, (r - l) - w - margin * 2)
+    span_y = max(0, (b - t) - h - margin * 2)
+    nx = max(l + margin, min(l + margin + round(rx * span_x), max(l + margin, r - w - margin)))
+    ny = max(t + margin, min(t + margin + round(ry * span_y), max(t + margin, b - h - margin)))
+    new_anchor = {
+        'rx': round(rx, 4),
+        'ry': round(ry, 4),
+        'mon': [l, t, r, b],
+    }
+    return [nx, ny], new_anchor
+
+
 class AnchorRegistry:
     """统一管理挂件重排回调，在显示器布局变化或系统唤醒时一次性归位全部挂件。"""
 

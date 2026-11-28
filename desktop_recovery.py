@@ -1,4 +1,4 @@
-"""异常退出守护：若主程序未恢复桌面图标就崩溃或被强杀，自动把桌面图标恢复显示。"""
+"""异常退出守护：若主程序未恢复桌面图标或屏幕背光就崩溃/被强杀，自动恢复桌面图标与笔记本背光。"""
 import msvcrt
 import os
 from pathlib import Path
@@ -19,11 +19,32 @@ def start():
     )
 
 
-def watch(stream, recover):
-    # 当主进程被强杀时管道直接 EOF，不经过 finally，同样会触发恢复
-    for line in stream:
-        if line.strip() == b'restored':
+def watch(stream, recover, restore_brightness=None):
+    # 当主进程被强杀时管道直接 EOF，不经过 finally，同样会触发恢复图标与背光
+    pending_brightness = None
+    for raw in stream:
+        line = raw.strip()
+        if line == b'restored':
             return
+        if line.startswith(b'brightness:'):
+            val = line.split(b':', 1)[1].strip()
+            if val == b'clear':
+                pending_brightness = None
+            else:
+                try:
+                    pct = int(val)
+                    if 1 <= pct <= 100:
+                        pending_brightness = pct
+                except ValueError:
+                    pass
+    if pending_brightness is not None:
+        if restore_brightness is None:
+            from screen_blackout import restore_backlight_wmi
+            restore_brightness = restore_backlight_wmi
+        try:
+            restore_brightness(pending_brightness)
+        except Exception:
+            pass
     recover()
 
 

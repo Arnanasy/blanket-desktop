@@ -3,14 +3,16 @@ import ctypes
 from pathlib import Path
 import queue
 
+from hotkeys import DEFAULT_HOTKEYS, HOTKEY_ACTIONS, HOTKEY_IDS, parse_hotkey, sanitize_hotkeys
 from win32 import (user32, gdi32, shell32, NOTIFYICONDATAW, ICONINFO, WNDPROC, SetWindowLongPtr,
                    GWLP_WNDPROC, WM_NULL, WM_QUERYENDSESSION, WM_ENDSESSION, WM_APP, WM_LBUTTONUP,
                    WM_RBUTTONUP, WM_DISPLAYCHANGE, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE,
-                   WM_HOTKEY, PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC, WTS_SESSION_UNLOCK,
+                   WM_HOTKEY, PBT_APMSUSPEND, PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC,
+                   WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
                    NIM_ADD, NIM_MODIFY, NIM_DELETE, NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO,
                    NIIF_INFO, TPM_RIGHTBUTTON, TPM_NONOTIFY, TPM_RETURNCMD, MF_STRING, MF_CHECKED,
                    MF_SEPARATOR, IMAGE_ICON, LR_LOADFROMFILE, NULL_PEN, SM_CXSMICON, SM_CYSMICON,
-                   MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VK_H, VK_T, cursor_pos)
+                   cursor_pos)
 
 WM_TRAY = WM_APP + 1
 IDM_OPEN = 2001
@@ -18,9 +20,22 @@ IDM_QUIT = 2002
 IDM_THEME = 2003
 IDM_GUARD = 2004
 IDM_MONITOR_PIN = 2005
-HOTKEY_ICONS = 1
-HOTKEY_THEME = 2
+HOTKEY_ICONS = HOTKEY_IDS['icons']
+HOTKEY_THEME = HOTKEY_IDS['theme']
 TRAY_ICON_ID = 1
+
+CLI_MSG_NAME = 'Blanket_CLI_Command_v1'
+CLI_ACK_MAGIC = 0x424C4B54
+CLI_CMD_SETTINGS = 1
+CLI_CMD_TOGGLE_ICONS = 2
+CLI_CMD_TOGGLE_THEME = 3
+CLI_CMD_SCREEN_OFF = 4
+CLI_CMD_AWAKE_TOGGLE = 5
+CLI_CMD_AWAKE_ON = 6
+CLI_CMD_AWAKE_OFF = 7
+CLI_CMD_SHOW_ICONS = 8
+CLI_CMD_HIDE_ICONS = 9
+
 from preferences import resource_path
 
 ICON_FILE = Path(resource_path('Blanket.ico'))
@@ -36,7 +51,10 @@ class TrayIcon:
         self._proc_ref = None        # 保持回调引用，防止被垃圾回收导致崩溃
         self._icon = None
         self.on_resume = lambda: None
+        self.on_lock = None
+        self.on_shutdown = None
         self.menu_closed = lambda: None
+        self.suspended = False
         self.on_theme = None
         self.get_focus_guard = None
         self.on_toggle_focus_guard = None
@@ -44,11 +62,17 @@ class TrayIcon:
         self.on_toggle_monitor_pin = None
         self.on_hotkey_icons = None
         self.on_hotkey_theme = None
+        self.on_hotkey_screen_off = None
+        self.on_hotkey_awake = None
+        self.on_cli_command = None
+        self.hotkey_specs = dict(DEFAULT_HOTKEYS)
         self.hotkeys_registered = set()
+        self.hotkey_conflicts = {}
         # WNDPROC 处于 Tcl DispatchMessage 重入栈内，绝不能直接调 Tk 的 after/after_idle；
         # 只把事件放进纯 Python 队列，由主循环在正常 Tk 上下文里调用 process_events() 消费。
         self._events = queue.SimpleQueue()
         self._taskbar_created = user32.RegisterWindowMessageW('TaskbarCreated')
+        self._cli_msg = user32.RegisterWindowMessageW(CLI_MSG_NAME)
 
     # 图标文件缺失时，用 GDI 自绘一个蓝色圆角 + 白色小窗口的图标
     def _make_icon(self):
@@ -83,7 +107,44 @@ class TrayIcon:
             gdi32.DeleteObject(obj)
         return hicon
 
-    def install(self):
+    def suspend_hotkeys(self):
+        """在录入新快捷键期间临时挂起全局热键拦截，防止按下已有热键时直接触发动作。"""
+        self.suspended = True
+        for hk_id in list(self.hotkeys_registered):
+            user32.UnregisterHotKey(self.hwnd, hk_id)
+        self.hotkeys_registered.clear()
+
+    def resume_hotkeys(self):
+        """退出快捷键录入框时恢复注册全局热键。"""
+        if not self.suspended:
+            return
+        self.suspended = False
+        self.apply_hotkeys()
+
+    def apply_hotkeys(self, hotkey_cfg=None):
+        """重新注册全部自定义全局快捷键，返回被其他软件占用的 {action: spec} 字典。"""
+        self.suspended = False
+        if hotkey_cfg is not None:
+            self.hotkey_specs = sanitize_hotkeys(hotkey_cfg)
+        for hk_id in list(self.hotkeys_registered):
+            user32.UnregisterHotKey(self.hwnd, hk_id)
+        self.hotkeys_registered.clear()
+        self.hotkey_conflicts.clear()
+
+        for action in HOTKEY_ACTIONS:
+            spec = self.hotkey_specs.get(action, '')
+            parsed = parse_hotkey(spec)
+            if parsed is None:
+                continue
+            mods, vk, canonical = parsed
+            hk_id = HOTKEY_IDS[action]
+            if user32.RegisterHotKey(self.hwnd, hk_id, mods, vk):
+                self.hotkeys_registered.add(hk_id)
+            else:
+                self.hotkey_conflicts[action] = canonical
+        return dict(self.hotkey_conflicts)
+
+    def install(self, hotkey_cfg=None):
         self._proc_ref = WNDPROC(self._wndproc)
         addr = ctypes.cast(self._proc_ref, ctypes.c_void_p).value
         self._old_proc = SetWindowLongPtr(self.hwnd, GWLP_WNDPROC, addr)
@@ -92,11 +153,7 @@ class TrayIcon:
                                        user32.GetSystemMetrics(SM_CYSMICON),
                                        LR_LOADFROMFILE) or self._make_icon()
         self._add_icon()
-        # 优先使用系统原生 RegisterHotKey（零漏检且不向前台软件透传）；被占用时由主循环回退轮询
-        mods = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT
-        for hk_id, vk in ((HOTKEY_ICONS, VK_H), (HOTKEY_THEME, VK_T)):
-            if user32.RegisterHotKey(self.hwnd, hk_id, mods, vk):
-                self.hotkeys_registered.add(hk_id)
+        self.apply_hotkeys(hotkey_cfg)
 
     def _base_data(self):
         nid = NOTIFYICONDATAW()
@@ -171,24 +228,44 @@ class TrayIcon:
             self._on_quit()
 
     def process_events(self):
-        """在主线程正常 Tk 回调中调用，消费 WNDPROC 排入的托盘与系统恢复事件。"""
+        """在主线程正常 Tk 回调中调用，消费 WNDPROC 排入的托盘、热键、CLI 与系统恢复事件。"""
+        hotkey_handlers = {
+            'icons': self.on_hotkey_icons,
+            'theme': self.on_hotkey_theme,
+            'screen_off': self.on_hotkey_screen_off,
+            'awake': self.on_hotkey_awake,
+        }
+        need_resume = False
         while True:
             try:
                 event = self._events.get_nowait()
             except queue.Empty:
-                return
+                break
+            if isinstance(event, tuple) and len(event) == 2:
+                kind, payload = event
+                if kind == 'hotkey':
+                    cb = hotkey_handlers.get(payload)
+                    if cb:
+                        cb()
+                elif kind == 'cli' and self.on_cli_command:
+                    self.on_cli_command(payload)
+                continue
             if event == 'left':
                 self._on_left()
             elif event == 'right':
                 self._show_menu()
             elif event == 'resume':
-                self.on_resume()
+                need_resume = True
+            elif event == 'lock' and self.on_lock:
+                self.on_lock()
             elif event == 'hotkey_icons' and self.on_hotkey_icons:
                 self.on_hotkey_icons()
             elif event == 'hotkey_theme' and self.on_hotkey_theme:
                 self.on_hotkey_theme()
             elif event == 'quit':
                 self._on_quit()
+        if need_resume:
+            self.on_resume()
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         # 响应系统关机/注销及安装包重启管理器（Restart Manager）优雅退出，提前恢复桌面图标防误藏
@@ -197,19 +274,30 @@ class TrayIcon:
         if msg == WM_ENDSESSION:
             if wparam:
                 try:
+                    if self.on_shutdown:
+                        self.on_shutdown()
+                except Exception:
+                    pass
+                try:
                     from desktop_windows import set_icons_visible
                     set_icons_visible(True)
                 except Exception:
                     pass
                 self._events.put('quit')
             return 0
+        if self._cli_msg and msg == self._cli_msg:
+            cmd = int(wparam)
+            if 1 <= cmd <= 9:
+                self._events.put(('cli', cmd))
+            return CLI_ACK_MAGIC
         if msg == WM_HOTKEY:
-            if wparam == HOTKEY_ICONS:
-                self._events.put('hotkey_icons')
-                return 0
-            if wparam == HOTKEY_THEME:
-                self._events.put('hotkey_theme')
-                return 0
+            for action, hk_id in HOTKEY_IDS.items():
+                if wparam == hk_id:
+                    self._events.put(('hotkey', action))
+                    return 0
+        if ((msg == WM_WTSSESSION_CHANGE and wparam == WTS_SESSION_LOCK)
+                or (msg == WM_POWERBROADCAST and wparam == PBT_APMSUSPEND)):
+            self._events.put('lock')
         resumed = ((msg == WM_WTSSESSION_CHANGE and wparam == WTS_SESSION_UNLOCK)
                    or (msg == WM_POWERBROADCAST and wparam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC))
                    or msg == WM_DISPLAYCHANGE)

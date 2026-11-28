@@ -1049,5 +1049,359 @@ class TestClockExtrasAndLayout(unittest.TestCase):
             root.destroy()
 
 
+class TestAutomationHotkeysCliAndMultiMonitor(unittest.TestCase):
+    """实测自动日夜切换、日出日落计算、闲置压暗、自定义热键/冲突检测、CLI 参数解析与多屏挂件归位。"""
+
+    def test_theme_schedule_sun_times_and_idle_dim(self):
+        from datetime import date, datetime
+        import theme_schedule as ts
+
+        # 1. 配置清洗容错
+        s = ts.sanitize_theme_schedule({
+            'enabled': 'yes', 'mode': 'bad', 'light_time': '7:5', 'dark_time': '25:99',
+            'solar_point': [22.8, 108.3], 'solar_place': ' 南宁 ',
+        })
+        self.assertFalse(s['enabled'])
+        self.assertEqual(s['mode'], 'fixed')
+        self.assertEqual(s['light_time'], '07:05')
+        self.assertEqual(s['dark_time'], '19:00')
+        self.assertEqual(s['solar_point'], [22.8, 108.3])
+        self.assertEqual(s['solar_place'], '南宁')
+
+        d = ts.sanitize_idle_dim({'enabled': True, 'minutes': 999, 'opacity': 5})
+        self.assertTrue(d['enabled'])
+        self.assertEqual(d['minutes'], 60)
+        self.assertEqual(d['opacity'], 15)
+
+        # 2. 日出日落纯数学计算（南宁夏至前后日出早于 07:00，日落晚于 18:30）
+        sr, ss = ts.calc_sun_times(22.82, 108.37, target_date=date(2026, 6, 21), tz_offset_hours=8.0)
+        self.assertIsNotNone(sr)
+        self.assertIsNotNone(ss)
+        self.assertTrue(5 <= sr.hour <= 7)
+        self.assertTrue(18 <= ss.hour <= 20)
+        # 西偏时区跨零点晚日落（例如东八区最西端高纬夏季日落在 00:xx 次日凌晨）仍能正常启用而不回退
+        st_late_west = ts.resolve_schedule_state(
+            {'enabled': True, 'mode': 'solar', 'light_time': '07:00', 'dark_time': '19:00'},
+            now_dt=datetime(2026, 6, 21, 23, 30), tz_offset_hours=8.0,
+            weather_cache={'point': [48.0, 52.0]},
+        )
+        self.assertTrue(st_late_west['using_solar'])
+        self.assertFalse(st_late_west['target_dark'])
+        # 极昼场景不崩溃，安全返回 (None, None)
+        p_sr, p_ss = ts.calc_sun_times(85.0, 0.0, target_date=date(2026, 6, 21), tz_offset_hours=0.0)
+        self.assertIsNone(p_sr)
+        self.assertIsNone(p_ss)
+
+        # 3. 固定时间与日出日落窗口切换（凌晨属于前一天夜间的 dark window）
+        cfg_fixed = {'enabled': True, 'mode': 'fixed', 'light_time': '07:00', 'dark_time': '19:00'}
+        st_early = ts.resolve_schedule_state(cfg_fixed, now_dt=datetime(2026, 11, 28, 2, 30))
+        self.assertTrue(st_early['target_dark'])
+        self.assertEqual(st_early['window_id'], '2026-11-27:dark')
+        st_day = ts.resolve_schedule_state(cfg_fixed, now_dt=datetime(2026, 11, 28, 12, 0))
+        self.assertFalse(st_day['target_dark'])
+        self.assertEqual(st_day['window_id'], '2026-11-28:light')
+
+        cfg_solar = {'enabled': True, 'mode': 'solar', 'light_time': '07:00', 'dark_time': '19:00'}
+        st_solar = ts.resolve_schedule_state(
+            cfg_solar, now_dt=datetime(2026, 6, 21, 12, 0), tz_offset_hours=8.0,
+            weather_cache={'point': [22.82, 108.37]},
+        )
+        self.assertTrue(st_solar['using_solar'])
+        self.assertFalse(st_solar['target_dark'])
+        # 无坐标时自动回退固定时间
+        st_fb = ts.resolve_schedule_state(cfg_solar, now_dt=datetime(2026, 6, 21, 20, 0), tz_offset_hours=8.0)
+        self.assertFalse(st_fb['using_solar'])
+        self.assertTrue(st_fb['target_dark'])
+
+        # 4. 闲置压暗计算
+        alpha_active, dimmed_false = ts.compute_idle_dim_alpha({'enabled': True, 'minutes': 5, 'opacity': 35}, 120, 100)
+        self.assertEqual(alpha_active, 1.0)
+        self.assertFalse(dimmed_false)
+        alpha_idle, dimmed_true = ts.compute_idle_dim_alpha({'enabled': True, 'minutes': 5, 'opacity': 35}, 301, 100)
+        self.assertAlmostEqual(alpha_idle, 0.35)
+        self.assertTrue(dimmed_true)
+        # 用户原本透明度更低（25%）时不被反向调亮
+        alpha_low, _ = ts.compute_idle_dim_alpha({'enabled': True, 'minutes': 5, 'opacity': 35}, 400, 25)
+        self.assertAlmostEqual(alpha_low, 0.25)
+
+    def test_hotkeys_parsing_conflicts_and_cli_ipc(self):
+        import hotkeys as hk
+        import tray_icon as ti
+        import hide_desktop_icons as hdi
+
+        # 1. 热键解析：安全校验与去重
+        self.assertIsNone(hk.parse_hotkey('H'))         # 禁止单字母占用打字
+        self.assertIsNotNone(hk.parse_hotkey('F9'))     # 功能键可单独绑定
+        mods, vk, canon = hk.parse_hotkey(' alt + ctrl + h ')
+        self.assertEqual(canon, 'Ctrl+Alt+H')
+        self.assertEqual(vk, ord('H'))
+        self.assertTrue(mods & hk.MOD_CONTROL)
+        self.assertTrue(mods & hk.MOD_ALT)
+        self.assertEqual(hk.format_hotkey_from_vk(ctrl=True, shift=True, vk=ord('M')), 'Ctrl+Shift+M')
+        self.assertEqual(hk.format_hotkey_from_vk(ctrl=True, shift=True, vk=0, keysym='m'), 'Ctrl+Shift+M')
+
+        sanitized = hk.sanitize_hotkeys({
+            'icons': 'Ctrl+Alt+H',
+            'theme': 'Ctrl+Alt+H',      # 重复组合应自动去重清空
+            'screen_off': 'Ctrl+Alt+O',
+            'awake': '',
+        })
+        self.assertEqual(sanitized['icons'], 'Ctrl+Alt+H')
+        self.assertEqual(sanitized['theme'], '')
+        self.assertEqual(sanitized['screen_off'], 'Ctrl+Alt+O')
+
+        # 2. TrayIcon 动态注册与冲突检出 + CLI 消息入队分发
+        tray = ti.TrayIcon(100, lambda: None, lambda: None, lambda: None)
+        with mock.patch.object(ti.user32, 'RegisterHotKey', side_effect=[True, False, True]), \
+             mock.patch.object(ti.user32, 'UnregisterHotKey', return_value=1):
+            conflicts = tray.apply_hotkeys({
+                'icons': 'Ctrl+Alt+H',
+                'theme': 'Ctrl+Alt+T',
+                'screen_off': 'Ctrl+Alt+O',
+                'awake': '',
+            })
+        self.assertEqual(conflicts, {'theme': 'Ctrl+Alt+T'})
+        self.assertIn(hk.HOTKEY_IDS['icons'], tray.hotkeys_registered)
+        self.assertNotIn(hk.HOTKEY_IDS['theme'], tray.hotkeys_registered)
+
+        # 录制快捷键期间临时挂起全局热键拦截，结束后自动恢复注册
+        with mock.patch.object(ti.user32, 'UnregisterHotKey', return_value=1) as unreg_mock, \
+             mock.patch.object(ti.user32, 'RegisterHotKey', return_value=True):
+            tray.suspend_hotkeys()
+            self.assertTrue(tray.suspended)
+            self.assertEqual(len(tray.hotkeys_registered), 0)
+            self.assertGreaterEqual(unreg_mock.call_count, 2)
+            tray.resume_hotkeys()
+            self.assertFalse(tray.suspended)
+            self.assertIn(hk.HOTKEY_IDS['icons'], tray.hotkeys_registered)
+
+        # 异常强杀守护进程：收到 brightness:75 后主进程崩溃 EOF，应自动恢复 75% 背光与桌面图标
+        recovered_icons = []
+        recovered_bright = []
+        desktop_recovery.watch(
+            io.BytesIO(b'brightness:75\n'),
+            lambda: recovered_icons.append(True),
+            restore_brightness=lambda lv: recovered_bright.append(lv),
+        )
+        self.assertEqual(recovered_icons, [True])
+        self.assertEqual(recovered_bright, [75])
+        # 已唤醒清空后崩溃：只恢复图标，不误改背光
+        recovered_bright.clear()
+        desktop_recovery.watch(
+            io.BytesIO(b'brightness:75\nbrightness:clear\n'),
+            lambda: None,
+            restore_brightness=lambda lv: recovered_bright.append(lv),
+        )
+        self.assertEqual(recovered_bright, [])
+
+        # 独立 CLI --screen-off 默认走纯黑遮罩而非 SC_MONITORPOWER
+        with mock.patch.object(hdi, 'load_config', return_value={'screen_off_mode': 'blackout'}), \
+             mock.patch.object(hdi, '_run_standalone_blackout') as blk_cli_mock, \
+             mock.patch.object(hdi, 'turn_off_monitors') as hw_cli_mock:
+            self.assertTrue(hdi._run_stateless_cli(ti.CLI_CMD_SCREEN_OFF))
+            blk_cli_mock.assert_called_once()
+            hw_cli_mock.assert_not_called()
+
+        cli_received = []
+        resumes = []
+        locks = []
+        tray.on_cli_command = lambda cmd: cli_received.append(cmd)
+        tray.on_resume = lambda: resumes.append(True)
+        tray.on_lock = lambda: locks.append(True)
+        tray._old_proc = 0
+        with mock.patch.object(ti.user32, 'CallWindowProcW', return_value=0):
+            ack = tray._wndproc(100, tray._cli_msg, ti.CLI_CMD_TOGGLE_THEME, 0)
+            tray._wndproc(100, ti.WM_DISPLAYCHANGE, 0, 0)
+            tray._wndproc(100, ti.WM_DISPLAYCHANGE, 0, 0)
+            tray._wndproc(100, ti.WM_DISPLAYCHANGE, 0, 0)
+            tray._wndproc(100, ti.WM_WTSSESSION_CHANGE, ti.WTS_SESSION_LOCK, 0)
+        self.assertEqual(ack, ti.CLI_ACK_MAGIC)
+        tray.process_events()
+        self.assertEqual(cli_received, [ti.CLI_CMD_TOGGLE_THEME])
+        self.assertEqual(len(resumes), 1)
+        self.assertEqual(locks, [True])
+
+        # 2.5 turn_off_monitors 严禁用 HWND_BROADCAST（避免多窗口排队重触发黑屏与闪烁）
+        import quick_hub as qh
+        with mock.patch.object(qh.user32, 'IsWindow', return_value=1), \
+             mock.patch.object(qh.user32, 'PostMessageW', return_value=1) as post_mock:
+            self.assertTrue(qh.turn_off_monitors(owner_hwnd=12345))
+            post_mock.assert_called_once_with(12345, qh.WM_SYSCOMMAND, qh.SC_MONITORPOWER, 2)
+        with mock.patch.object(qh.user32, 'CreateWindowExW', return_value=99999), \
+             mock.patch.object(qh.user32, 'SendMessageTimeoutW', return_value=1) as send_mock, \
+             mock.patch.object(qh.user32, 'DestroyWindow', return_value=1) as destroy_mock:
+            self.assertTrue(qh.turn_off_monitors())
+            self.assertEqual(send_mock.call_args[0][0], 99999)
+            self.assertEqual(send_mock.call_args[0][1:4], (qh.WM_SYSCOMMAND, qh.SC_MONITORPOWER, 2))
+            destroy_mock.assert_called_once_with(99999)
+
+        # 3. CLI 参数解析
+        self.assertEqual(hdi.parse_cli_args(['--minimized']), ('run', True))
+        self.assertEqual(hdi.parse_cli_args(['--toggle-icons']), ('remote', ti.CLI_CMD_TOGGLE_ICONS))
+        self.assertEqual(hdi.parse_cli_args(['--toggle-theme']), ('remote', ti.CLI_CMD_TOGGLE_THEME))
+        self.assertEqual(hdi.parse_cli_args(['--screen-off']), ('remote', ti.CLI_CMD_SCREEN_OFF))
+        self.assertEqual(hdi.parse_cli_args(['--awake-toggle']), ('remote', ti.CLI_CMD_AWAKE_TOGGLE))
+        self.assertEqual(hdi.parse_cli_args(['--help']), ('help', None))
+
+    def test_multimonitor_retarget_and_automation_dialog_tk(self):
+        import display_geometry as dg
+        import widget_layout as wl
+
+        # 多屏枚举与等比例跨屏迁移
+        monitors = dg.list_monitors(work=True)
+        self.assertGreaterEqual(len(monitors), 1)
+        self.assertTrue(monitors[0]['primary'])
+
+        new_pos, new_anchor = wl.retarget_anchor_to_rect(
+            {'rx': 0.5, 'ry': 0.5, 'mon': [0, 0, 1920, 1040]},
+            [900, 480], 200, 80, (1920, 0, 3840, 1080), margin=8,
+        )
+        self.assertGreaterEqual(new_pos[0], 1928)
+        self.assertLessEqual(new_pos[0] + 200, 3832)
+        self.assertEqual(new_anchor['mon'], [1920, 0, 3840, 1080])
+
+        if os.environ.get('CI') or os.environ.get('GITHUB_ACTIONS'):
+            return
+
+        import tkinter as tk
+        import automation_dialog as ad
+        import hotkeys as hk
+        import theme_schedule as ts
+
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f'当前环境无法初始化 Tk 窗口：{exc}')
+        root.withdraw()
+        try:
+            class _FakeTray:
+                hotkey_conflicts = {'theme': 'Ctrl+Alt+T'}
+                hotkeys_registered = {hk.HOTKEY_IDS['icons']}
+
+            class _FakeWidgets:
+                weather = {'place': '南宁', 'point': [22.82, 108.37]}
+
+            class _FakeApp:
+                def __init__(self, r):
+                    self.root = r
+                    self.tray = _FakeTray()
+                    self.widgets = _FakeWidgets()
+                    self.automation_dialog = None
+                    self.theme_schedule = ts.sanitize_theme_schedule({'enabled': True, 'mode': 'solar'})
+                    self.idle_dim = ts.sanitize_idle_dim({'enabled': True, 'minutes': 5, 'opacity': 40})
+                    self.hotkeys = hk.sanitize_hotkeys(None)
+                def update_theme_schedule(self, **kw):
+                    self.theme_schedule.update({k: v for k, v in kw.items() if k in self.theme_schedule and v is not None})
+                def update_idle_dim(self, **kw):
+                    self.idle_dim.update({k: v for k, v in kw.items() if k in self.idle_dim and v is not None})
+                def update_hotkeys(self, new_hk, **_kw):
+                    self.hotkeys = dict(new_hk)
+                    return {}
+                def refresh_solar_location(self, on_done=None):
+                    if on_done:
+                        on_done()
+
+            fake_app = _FakeApp(root)
+            dlg = ad.open_automation_dialog(fake_app)
+            self.assertTrue(dlg.winfo_exists())
+            # 重复调用应前置同一窗口而不新开第二个
+            self.assertIs(ad.open_automation_dialog(fake_app), dlg)
+            dlg.destroy()
+
+            # 无闪烁纯黑息屏遮罩与背光安全恢复实测（模拟 WMI 背光读写）
+            import screen_blackout as sb
+            import threading
+
+            dim_calls = []
+            restored_levels = []
+            dim_started = threading.Event()
+            allow_dim_finish = threading.Event()
+
+            def fake_dim():
+                dim_calls.append(True)
+                dim_started.set()
+                allow_dim_finish.wait(timeout=2.0)
+                return 80
+
+            def fake_restore(level):
+                restored_levels.append(level)
+                return True
+
+            with mock.patch.object(sb, 'dim_backlight_wmi', side_effect=fake_dim), \
+                 mock.patch.object(sb, 'restore_backlight_wmi', side_effect=fake_restore):
+                blk = sb.ScreenBlackout(root)
+                blk.start()
+                self.assertTrue(blk.active)
+                self.assertFalse(blk.wake_on_move)
+                self.assertIsNotNone(blk.win)
+                self.assertTrue(dim_started.wait(timeout=1.5))
+
+                # 宽限期（1.2s）内输入不误唤醒
+                blk._on_input_wake()
+                self.assertTrue(blk.active)
+
+                # 默认关闭移动唤醒时，即使鼠标大幅移动也不误唤醒；但无焦点按任意键（last_input_tick 推进且光标不动）能立即唤醒
+                with mock.patch.object(sb, 'key_down', return_value=False), \
+                     mock.patch.object(sb, 'last_input_tick', side_effect=[1000, 1005, 1020]), \
+                     mock.patch.object(sb, 'cursor_pos', side_effect=[
+                         type('P', (), {'x': 200, 'y': 200})(),
+                         type('P', (), {'x': 1200, 'y': 900})(),
+                         type('P', (), {'x': 1200, 'y': 900})(),
+                     ]):
+                    blk._arm_at = time.monotonic() - 0.1
+                    blk._poll_wake()   # 首帧建立基准
+                    self.assertTrue(blk.active)
+                    blk._poll_wake()   # 第二帧：光标大幅移动但关闭了移动唤醒 -> 保持黑屏
+                    self.assertTrue(blk.active)
+                    blk._poll_wake()   # 第三帧：光标未动但硬件输入计数推进（按键盘） -> 立即唤醒！
+                    self.assertFalse(blk.active)
+
+                allow_dim_finish.set()
+                deadline = time.monotonic() + 1.5
+                while not restored_levels and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.02)
+                self.assertEqual(restored_levels, [80])
+
+                # 开启大幅晃动唤醒时：宽限后首帧记起点，小抖动不醒，超过 260px 才醒
+                restored_levels.clear()
+                blk.wake_on_move = True
+                blk.start()
+                blk._arm_at = time.monotonic() - 0.1
+                with mock.patch.object(sb, 'key_down', return_value=False), \
+                     mock.patch.object(sb, 'last_input_tick', return_value=2000):
+                    with mock.patch.object(sb, 'cursor_pos', return_value=type('P', (), {'x': 500, 'y': 500})()):
+                        blk._poll_wake()
+                        self.assertTrue(blk.active)
+                        self.assertEqual(blk._origin_pt, (500, 500))
+                    with mock.patch.object(sb, 'cursor_pos', return_value=type('P', (), {'x': 550, 'y': 530})()):
+                        blk._poll_wake()
+                        self.assertTrue(blk.active)
+                    with mock.patch.object(sb, 'cursor_pos', return_value=type('P', (), {'x': 800, 'y': 520})()):
+                        blk._poll_wake()
+                        self.assertFalse(blk.active)
+                blk.wake_on_move = False
+
+                # 正常先降背光后唤醒：wake 时同样恢复 80
+                restored_levels.clear()
+                blk.start()
+                deadline = time.monotonic() + 1.5
+                while blk._saved_brightness is None and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.02)
+                self.assertEqual(blk._saved_brightness, 80)
+                blk._arm_at = time.monotonic() - 0.1
+                blk._on_input_wake()
+                self.assertFalse(blk.active)
+                deadline = time.monotonic() + 1.5
+                while not restored_levels and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.02)
+                self.assertEqual(restored_levels, [80])
+                blk.close()
+        finally:
+            root.destroy()
+
+
 if __name__ == '__main__':
     unittest.main()

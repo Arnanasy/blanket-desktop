@@ -17,20 +17,34 @@ import sys
 sys.dont_write_bytecode = True
 
 import ctypes
+from threading import Thread
 import time
 import tkinter as tk
 from pathlib import Path
 
+from automation_dialog import open_automation_dialog
 import desktop_recovery
 from desktop_widgets import Widgets
 from desktop_windows import (DesktopClick, get_cursor, icons_visible, set_icons_visible,
                              in_hotzone, input_idle_seconds, invalidate_cache)
+from hotkeys import HOTKEY_ACTIONS, HOTKEY_IDS, HOTKEY_LABELS, parse_hotkey, sanitize_hotkeys
 from preferences import load_config, save_config, autostart_enabled, set_autostart, repair_autostart
-from tray_icon import TrayIcon, HOTKEY_ICONS, HOTKEY_THEME
+from quick_hub import turn_off_monitors
+from screen_blackout import ScreenBlackout
+from theme_schedule import resolve_schedule_state, sanitize_idle_dim, sanitize_theme_schedule
+from tray_icon import (
+    TrayIcon, HOTKEY_ICONS, HOTKEY_THEME,
+    CLI_MSG_NAME, CLI_ACK_MAGIC,
+    CLI_CMD_SETTINGS, CLI_CMD_TOGGLE_ICONS, CLI_CMD_TOGGLE_THEME, CLI_CMD_SCREEN_OFF,
+    CLI_CMD_AWAKE_TOGGLE, CLI_CMD_AWAKE_ON, CLI_CMD_AWAKE_OFF,
+    CLI_CMD_SHOW_ICONS, CLI_CMD_HIDE_ICONS,
+)
 from win32 import (user32, kernel32, wtsapi32, toplevel_hwnd, key_down, class_name,
+                   WNDENUMPROC, SMTO_ABORTIFHUNG,
                    ERROR_ALREADY_EXISTS, EVENT_MODIFY_STATE, WAIT_OBJECT_0,
                    NOTIFY_FOR_THIS_SESSION, VK_LBUTTON, VK_RBUTTON, VK_MBUTTON,
-                   VK_CONTROL, VK_MENU, VK_H, VK_T)
+                   VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN,
+                   MOD_CONTROL, MOD_ALT, MOD_SHIFT, MOD_WIN)
 
 # 单实例与“双击快捷方式唤起主窗口”的跨进程内核对象（兼容旧版运行实例唤起）
 MUTEX_NAME = 'Local\\Blanket_SingleInstance'
@@ -75,6 +89,9 @@ class App:
     def __init__(self, root, show_event=None):
         self.root = root
         self.cfg = load_config()
+        self.theme_schedule = self.cfg.setdefault('theme_schedule', sanitize_theme_schedule(None))
+        self.idle_dim = self.cfg.setdefault('idle_dim', sanitize_idle_dim(None))
+        self.hotkeys = self.cfg.setdefault('hotkeys', sanitize_hotkeys(None))
         self._show_event = show_event
         # 启动时要恢复的图标状态必须先取出来：恢复完成前 refresh_ui 不得覆盖它
         self._initial_visible = icons_visible()
@@ -84,6 +101,15 @@ class App:
         self._dark = None
         self._quitting = False
         self.recovery_guard = None
+        self.automation_dialog = None
+        self._warn_until = {}
+        self._last_schedule_check = 0.0
+        self._solar_probing = False
+        self._last_solar_fail = 0.0
+        self._hk_held_map = {}
+        self._last_screen_off = 0.0
+        self._screen_off_timer = None
+        self._resume_timer = None
         try:
             from preferences import resource_path
             root.iconbitmap(default=resource_path('Blanket.ico'))
@@ -174,6 +200,18 @@ class App:
         if self.auto_var.get():
             self.auto_detail_frame.pack(fill='x', padx=(16, 0), pady=(2, 2))
 
+        theme_auto_row = tk.Frame(opt, bg=BG)
+        theme_auto_row.pack(fill='x', pady=(4, 0))
+        self.auto_theme_var = tk.BooleanVar(value=bool(self.theme_schedule.get('enabled', False)))
+        tk.Checkbutton(theme_auto_row, text='定时切换深浅色', variable=self.auto_theme_var,
+                       font=f_normal, bg=BG, fg=TEXT, activebackground=BG, selectcolor=WHITE,
+                       anchor='w', command=self._on_auto_theme_toggled).pack(side='left')
+        auto_cfg_btn = tk.Button(theme_auto_row, text='自动与热键…', command=self.open_automation,
+                                 font=f_small, bg='#E2E8F0', fg=TEXT, activebackground='#CBD5E1',
+                                 relief='flat', borderwidth=0, cursor='hand2', padx=8, pady=2)
+        auto_cfg_btn.pack(side='right')
+        self.neutral_buttons.add(auto_cfg_btn)
+
         # 底部一行三按钮
         actions = tk.Frame(root, bg=BG)
         actions.pack(fill='x', padx=22, pady=(10, 4))
@@ -193,10 +231,10 @@ class App:
         action('藏到托盘', self.hide_window, 1)
         action('退出', self.quit_app, 2, danger=True)
 
-        hint_label = tk.Label(root, text='Ctrl+Alt+H 切图标 · Ctrl+Alt+T 切主题',
-                              font=f_small, bg=BG, fg=SUBTEXT)
-        hint_label.pack(pady=(4, 12))
-        self.subtext_labels.add(hint_label)
+        self.hint_label = tk.Label(root, text='', font=f_small, bg=BG, fg=SUBTEXT)
+        self.hint_label.pack(pady=(4, 12))
+        self.subtext_labels.add(self.hint_label)
+        self._refresh_hotkey_hint()
 
         self.pause_button = None
         self._update_theme_label(_system_dark())
@@ -204,8 +242,6 @@ class App:
 
         # 运行状态
         self._in_zone = False
-        self._hk_held = False
-        self._theme_held = False
         self._last_x, self._last_y = get_cursor()
         self._last_activity = time.monotonic()
         self._grace_until = time.monotonic() + 5  # 启动 5 秒宽限，先看清界面
@@ -216,27 +252,40 @@ class App:
         top_hwnd = toplevel_hwnd(root)
         self.tray = TrayIcon(top_hwnd, self._tray_toggle, self._tray_open, self.quit_app)
         self.tray.on_resume = self.resume_desktop
-        self.tray.on_theme = self.toggle_theme
+        self.tray.on_lock = lambda: self.blackout.wake() if getattr(self, 'blackout', None) else None
+        self.tray.on_shutdown = lambda: self.blackout.close() if getattr(self, 'blackout', None) else None
+        self.tray.on_theme = lambda: self.toggle_theme(manual=True)
         self.tray.get_focus_guard = lambda: self.focus_guard_var.get()
         self.tray.on_toggle_focus_guard = self.toggle_focus_guard
         self.tray.get_monitor_pinned = lambda: bool(getattr(self, 'widgets', None) and self.widgets.monitor.is_pinned())
         self.tray.on_toggle_monitor_pin = self.toggle_monitor_pin
         self.tray.on_hotkey_icons = self.manual_toggle
-        self.tray.on_hotkey_theme = self.toggle_theme
+        self.tray.on_hotkey_theme = lambda: self.toggle_theme(manual=True)
+        self.tray.on_hotkey_screen_off = self.screen_off
+        self.tray.on_hotkey_awake = self.toggle_awake
+        self.tray.on_cli_command = self.handle_cli_command
         self.mouse_cutoff = 0
         self.tray.menu_closed = self.discard_mouse
-        self.tray.install()
+        self.tray.install(self.hotkeys)
         wtsapi32.WTSRegisterSessionNotification(top_hwnd, NOTIFY_FOR_THIS_SESSION)
 
         # 点桌面空白处切换图标：使用轻量 20ms 轮询，不安装 WH_MOUSE_LL 全局钩子，
         # 避免 Python GIL 阻塞系统级鼠标消息导致任务栏/游戏里鼠标迟钝
         self.desktop_click = DesktopClick(self._click_unavailable)
+        self.blackout = ScreenBlackout(
+            self.root,
+            wake_on_move=bool(self.cfg.get('screen_off_wake_move', False)),
+            on_brightness_guard=self._sync_brightness_guard,
+        )
         self.widgets = Widgets(self)
         self.restore_visibility()
 
         self._persist()
+        self._check_theme_schedule(force=True)
         self.refresh_ui()
         self.sync_theme(_system_dark())
+        if self.tray.hotkey_conflicts:
+            self.root.after(1200, self._notify_hotkey_conflicts)
         self.root.after(POLL_MS, self.poll)
         self.root.after(10, self.poll_mouse)
 
@@ -256,7 +305,7 @@ class App:
             self.tray.process_events()
             if self._quitting:
                 return
-            if self.widgets.busy or time.monotonic() <= self.mouse_cutoff:
+            if self.blackout.active or self.widgets.busy or time.monotonic() <= self.mouse_cutoff:
                 self.desktop_click.reset()
             elif self.desktop_click.check(suppress=self.widgets.guard_active):
                 self._blank_click()
@@ -269,6 +318,8 @@ class App:
         self.manual_toggle()
 
     def open_settings(self):
+        if getattr(self, 'blackout', None) and self.blackout.active:
+            self.blackout.wake()
         self._grace_until = time.monotonic() + 5
         self.root.deiconify()
         self.root.lift()
@@ -280,16 +331,265 @@ class App:
         """点桌面空白处：切换图标显示/隐藏。"""
         self.manual_toggle()
 
+    # ------------------------------------------------------------ 提示与自动化设置
+    def warn_user(self, key, title, message, cooldown=60.0):
+        """带节流冷却的托盘气泡提示，避免异常时连续弹窗轰炸。"""
+        now = time.monotonic()
+        if now < self._warn_until.get(key, 0.0):
+            return False
+        self._warn_until[key] = now + float(cooldown)
+        try:
+            self.tray.notify(title, message)
+        except Exception:
+            pass
+        return True
+
+    def _notify_hotkey_conflicts(self):
+        conflicts = getattr(self.tray, 'hotkey_conflicts', {})
+        if not conflicts:
+            return
+        desc = '、'.join(f'{HOTKEY_LABELS.get(k, k)}({v})' for k, v in conflicts.items())
+        self.warn_user(
+            'hotkey_conflict',
+            'Blanket · 快捷键被占用',
+            f'{desc} 已被其他软件占用，可在「自动与热键」设置中更换。',
+            cooldown=120.0,
+        )
+
+    def _refresh_hotkey_hint(self):
+        hk_i = self.hotkeys.get('icons') or '未设'
+        hk_t = self.hotkeys.get('theme') or '未设'
+        self.hint_label.config(text=f'{hk_i} 切图标 · {hk_t} 切主题')
+
+    def open_automation(self):
+        open_automation_dialog(self)
+
+    def _on_auto_theme_toggled(self):
+        self.update_theme_schedule(enabled=self.auto_theme_var.get(), apply_now=True,
+                                   probe_loc=(self.theme_schedule.get('mode') == 'solar'))
+
+    def update_hotkeys(self, new_hotkeys, notify_conflict=True):
+        self.hotkeys = sanitize_hotkeys(new_hotkeys)
+        self.cfg['hotkeys'] = dict(self.hotkeys)
+        self._hk_held_map.clear()
+        conflicts = self.tray.apply_hotkeys(self.hotkeys)
+        self._refresh_hotkey_hint()
+        save_config(self.cfg)
+        if conflicts and notify_conflict:
+            self._notify_hotkey_conflicts()
+        return conflicts
+
+    def refresh_solar_location(self, on_done=None):
+        """在后台线程获取一次本地经纬度用于计算日出日落时间，不阻塞界面。"""
+        if self._solar_probing:
+            return
+        self._solar_probing = True
+
+        def worker():
+            point = None
+            place = ''
+            try:
+                import local_weather
+                lat, lon, loc_place = local_weather.location()
+                point = [lat, lon]
+                place = loc_place or ''
+            except Exception:
+                self._last_solar_fail = time.monotonic()
+            finally:
+                def finish():
+                    self._solar_probing = False
+                    if point is not None:
+                        self.theme_schedule['solar_point'] = point
+                        if place:
+                            self.theme_schedule['solar_place'] = place
+                        self.cfg['theme_schedule'] = dict(self.theme_schedule)
+                        save_config(self.cfg)
+                        self._check_theme_schedule(force=True)
+                    if callable(on_done):
+                        try:
+                            on_done()
+                        except Exception:
+                            pass
+                try:
+                    self.root.after_idle(finish)
+                except tk.TclError:
+                    self._solar_probing = False
+
+        Thread(target=worker, name='solar-location', daemon=True).start()
+
+    def update_theme_schedule(self, enabled=None, mode=None, light_time=None, dark_time=None,
+                              apply_now=False, probe_loc=False, on_done=None, on_loc=None):
+        merged = dict(self.theme_schedule)
+        if enabled is not None:
+            merged['enabled'] = bool(enabled)
+        if mode is not None:
+            merged['mode'] = mode
+        if light_time is not None:
+            merged['light_time'] = light_time
+        if dark_time is not None:
+            merged['dark_time'] = dark_time
+        if apply_now:
+            merged['manual_window'] = ''
+        self.theme_schedule = sanitize_theme_schedule(merged)
+        self.cfg['theme_schedule'] = dict(self.theme_schedule)
+        if hasattr(self, 'auto_theme_var'):
+            self.auto_theme_var.set(bool(self.theme_schedule['enabled']))
+        save_config(self.cfg)
+        if apply_now and self.theme_schedule['enabled']:
+            self._check_theme_schedule(force=True)
+        if probe_loc and self.theme_schedule['mode'] == 'solar':
+            weather_pt = getattr(self, 'widgets', None) and self.widgets.weather.get('point')
+            if not weather_pt and not self.theme_schedule.get('solar_point'):
+                self.refresh_solar_location(on_done=on_loc or on_done)
+
+    def update_idle_dim(self, enabled=None, minutes=None, opacity=None, wake_on_move=None):
+        merged = dict(self.idle_dim)
+        if enabled is not None:
+            merged['enabled'] = bool(enabled)
+        if minutes is not None:
+            merged['minutes'] = minutes
+        if opacity is not None:
+            merged['opacity'] = opacity
+        self.idle_dim = sanitize_idle_dim(merged)
+        self.cfg['idle_dim'] = dict(self.idle_dim)
+        if wake_on_move is not None:
+            self.cfg['screen_off_wake_move'] = bool(wake_on_move)
+            if getattr(self, 'blackout', None):
+                self.blackout.wake_on_move = bool(wake_on_move)
+        save_config(self.cfg)
+        if getattr(self, 'widgets', None):
+            self.widgets.apply_idle_dim(self.idle_dim, input_idle_seconds())
+
+    def _check_theme_schedule(self, force=False):
+        if not self.theme_schedule.get('enabled'):
+            return
+        now_mono = time.monotonic()
+        if not force and (now_mono - self._last_schedule_check) < 10.0:
+            return
+        self._last_schedule_check = now_mono
+
+        weather_cache = getattr(self, 'widgets', None) and self.widgets.weather
+        if (self.theme_schedule.get('mode') == 'solar'
+                and not (isinstance(weather_cache, dict) and weather_cache.get('point'))
+                and not self.theme_schedule.get('solar_point')
+                and (now_mono - self._last_solar_fail) >= 300.0):
+            self.refresh_solar_location()
+
+        st = resolve_schedule_state(self.theme_schedule, weather_cache=weather_cache)
+        if self.theme_schedule.get('manual_window') == st['window_id']:
+            return
+        if self.theme_schedule.get('manual_window'):
+            self.theme_schedule['manual_window'] = ''
+            self.cfg['theme_schedule'] = dict(self.theme_schedule)
+            save_config(self.cfg)
+
+        try:
+            import theme_switch
+            if theme_switch.is_dark() != st['target_dark']:
+                if theme_switch.set_theme(st['target_dark']):
+                    self.sync_theme(st['target_dark'])
+                    if getattr(self, 'widgets', None):
+                        self.widgets.theme()
+        except OSError:
+            pass
+
+    def _sync_brightness_guard(self, brightness_or_none):
+        """将息屏前的原始背光百分比实时同步给守护子进程，防止主进程被强杀后屏幕停在 0% 亮度。"""
+        guard = self.recovery_guard
+        if not guard or not guard.stdin:
+            return
+        msg = b'brightness:clear\n' if brightness_or_none is None else f'brightness:{int(brightness_or_none)}\n'.encode('ascii')
+        try:
+            guard.stdin.write(msg)
+            guard.stdin.flush()
+        except OSError:
+            pass
+
+    def screen_off(self, delay_ms=150):
+        now = time.monotonic()
+        if now - self._last_screen_off < 1.5:
+            return
+        self._last_screen_off = now
+        if self._screen_off_timer is not None:
+            try:
+                self.root.after_cancel(self._screen_off_timer)
+            except tk.TclError:
+                pass
+            self._screen_off_timer = None
+        if getattr(self, 'blackout', None) and self.blackout.active:
+            self.blackout.wake()
+            return
+        if self.cfg.get('screen_off_mode') == 'hardware':
+            hwnd = getattr(getattr(self, 'tray', None), 'hwnd', None)
+            wait_ms = max(350, int(delay_ms))
+            self._screen_off_timer = self.root.after(wait_ms, lambda: self._run_hardware_screen_off(hwnd))
+            return
+        if delay_ms > 0:
+            self._screen_off_timer = self.root.after(int(delay_ms), self._run_blackout_screen_off)
+        else:
+            self._run_blackout_screen_off()
+
+    def _run_blackout_screen_off(self):
+        self._screen_off_timer = None
+        self.blackout.start()
+
+    def _run_hardware_screen_off(self, hwnd):
+        self._screen_off_timer = None
+        turn_off_monitors(hwnd)
+
+    def toggle_awake(self, enable=None):
+        if getattr(self, 'widgets', None) and getattr(self.widgets, 'bar', None):
+            return self.widgets.bar.set_awake(enable)
+        return False
+
+    def handle_cli_command(self, cmd_id):
+        if cmd_id == CLI_CMD_SETTINGS:
+            self.open_settings()
+        elif cmd_id == CLI_CMD_TOGGLE_ICONS:
+            self.manual_toggle()
+        elif cmd_id == CLI_CMD_SHOW_ICONS:
+            self.set_icons_state(True)
+        elif cmd_id == CLI_CMD_HIDE_ICONS:
+            self.set_icons_state(False)
+        elif cmd_id == CLI_CMD_TOGGLE_THEME:
+            self.toggle_theme(manual=True)
+        elif cmd_id == CLI_CMD_SCREEN_OFF:
+            self.screen_off()
+        elif cmd_id == CLI_CMD_AWAKE_TOGGLE:
+            self.toggle_awake(None)
+        elif cmd_id == CLI_CMD_AWAKE_ON:
+            self.toggle_awake(True)
+        elif cmd_id == CLI_CMD_AWAKE_OFF:
+            self.toggle_awake(False)
+
     # ------------------------------------------------------------ 操作
+    def _report_icon_failure(self):
+        self.state_label.config(text='未找到传统桌面图标列表（可能被桌面软件接管）')
+        self.warn_user(
+            'desktop_icons',
+            'Blanket · 无法控制桌面图标',
+            '未找到 Windows 传统桌面图标视图（可能安装了 Fences 等桌面整理软件，或资源管理器正在重启）。',
+        )
+
+    def set_icons_state(self, show):
+        if not set_icons_visible(bool(show)):
+            invalidate_cache()
+            if not set_icons_visible(bool(show)):
+                self._report_icon_failure()
+                return False
+        self._last_activity = time.monotonic()
+        self.refresh_ui()
+        return True
+
     def manual_toggle(self):
         vis = icons_visible()
         if vis is None:
-            self.state_label.config(text='无法获取桌面状态')
+            invalidate_cache()
+            vis = icons_visible()
+        if vis is None:
+            self._report_icon_failure()
             return
-        set_icons_visible(not vis)
-        # 刷新活动计时，显示后给用户完整的无操作宽限，避免太快又隐藏
-        self._last_activity = time.monotonic()
-        self.refresh_ui()
+        self.set_icons_state(not vis)
 
     def _on_auto_changed(self):
         if self.auto_var.get():
@@ -320,15 +620,25 @@ class App:
         self._restyle(dark)
         self._update_theme_label(dark)
 
-    def toggle_theme(self):
+    def toggle_theme(self, manual=True):
         """一键切换 Windows 深色/浅色主题，应用和浏览器同时生效。"""
         try:
             import theme_switch
             dark = theme_switch.toggle()
         except OSError as error:
-            from tkinter import messagebox
-            messagebox.showerror('主题切换失败', str(error), parent=self.root)
+            if self.root.winfo_viewable():
+                from tkinter import messagebox
+                messagebox.showerror('主题切换失败', str(error), parent=self.root)
+            else:
+                self.warn_user('theme_err', 'Blanket · 主题切换失败',
+                               'Windows 拒绝修改浅色/深色设置，请检查系统策略限制。')
             return
+        if manual and self.theme_schedule.get('enabled'):
+            weather_cache = getattr(self, 'widgets', None) and self.widgets.weather
+            st = resolve_schedule_state(self.theme_schedule, weather_cache=weather_cache)
+            self.theme_schedule['manual_window'] = st['window_id']
+            self.cfg['theme_schedule'] = dict(self.theme_schedule)
+            save_config(self.cfg)
         self.sync_theme(dark)
         self.widgets.theme()               # 刷新时钟配色与主题按钮
 
@@ -369,10 +679,11 @@ class App:
         ui_scale = max(1.0, self.root.winfo_fpixels('1i') / 96.0)
         install_checkmark_style(self.root, style, dark=dark, ui_scale=ui_scale)
         style.configure('.', background=bg, foreground=text, fieldbackground=select,
-                        troughcolor=bg, selectbackground=BLUE, selectforeground=WHITE)
-        for name in ('TButton', 'TCheckbutton', 'TRadiobutton', 'TCombobox'):
+                        troughcolor=bg, selectbackground=BLUE, selectforeground=WHITE,
+                        insertcolor=text, arrowcolor=text)
+        for name in ('TButton', 'TCheckbutton', 'TRadiobutton', 'TCombobox', 'TEntry', 'TSpinbox'):
             style.map(name, foreground=[('disabled', sub), ('active', text), ('!disabled', text)],
-                      background=[('active', select)], fieldbackground=[('readonly', select)])
+                      background=[('active', select)], fieldbackground=[('readonly', select), ('!disabled', select)])
         self.root.option_add('*Scale.background', bg)
         self.root.option_add('*Scale.foreground', text)
         self.root.option_add('*Scale.troughColor', select)
@@ -413,6 +724,9 @@ class App:
             'focus_guard': self.focus_guard_var.get(),
             'zone': self.zone_var.get(),
             'delay': self.delay_var.get(),
+            'theme_schedule': dict(self.theme_schedule),
+            'idle_dim': dict(self.idle_dim),
+            'hotkeys': dict(self.hotkeys),
         })
         save_config(self.cfg)
 
@@ -429,7 +743,18 @@ class App:
         self.refresh_ui()
 
     def resume_desktop(self):
-        """睡眠唤醒、解锁、显示器变化或资源管理器重启后，重新定位桌面窗口并刷新挂件。"""
+        """睡眠唤醒、解锁、显示器变化或资源管理器重启后，防抖合并刷新的同时重新定位桌面窗口。"""
+        if self._resume_timer is not None:
+            try:
+                self.root.after_cancel(self._resume_timer)
+            except tk.TclError:
+                pass
+        self._resume_timer = self.root.after(200, self._do_resume_desktop)
+
+    def _do_resume_desktop(self):
+        self._resume_timer = None
+        if self._quitting:
+            return
         invalidate_cache()
         self.widgets.reset_refresh()
         self.refresh_ui()
@@ -441,6 +766,10 @@ class App:
         # 先立刻隐藏所有窗口并移除托盘图标，避免清理 I/O 与钩子卸载造成“退出卡一下”
         try:
             self.root.withdraw()
+            if getattr(self, 'blackout', None):
+                self.blackout.close()
+            if self.automation_dialog and self.automation_dialog.winfo_exists():
+                self.automation_dialog.withdraw()
             self.widgets.hide_all()
             self.root.update_idletasks()
         except tk.TclError:
@@ -480,22 +809,38 @@ class App:
 
     # ------------------------------------------------------------ 快捷键
     def check_hotkey(self):
-        # 已通过 RegisterHotKey 注册的热键由系统事件分发，仅对被其他程序占用的热键回退轮询
-        need_icons = HOTKEY_ICONS not in self.tray.hotkeys_registered
-        need_theme = HOTKEY_THEME not in self.tray.hotkeys_registered
-        if not (need_icons or need_theme):
+        if getattr(self.tray, 'suspended', False):
+            self._hk_held_map.clear()
             return
-        combo = key_down(VK_CONTROL) and key_down(VK_MENU)
-        if need_icons:
-            down = combo and key_down(VK_H)
-            if down and not self._hk_held:
-                self.manual_toggle()
-            self._hk_held = down
-        if need_theme:
-            theme_down = combo and key_down(VK_T)
-            if theme_down and not self._theme_held:
-                self.toggle_theme()
-            self._theme_held = theme_down
+        # 已通过 RegisterHotKey 注册的热键由系统事件分发，仅对被其他程序占用的热键回退轮询
+        actions = {
+            'icons': self.manual_toggle,
+            'theme': lambda: self.toggle_theme(manual=True),
+            'screen_off': self.screen_off,
+            'awake': self.toggle_awake,
+        }
+        for action in HOTKEY_ACTIONS:
+            hk_id = HOTKEY_IDS[action]
+            if hk_id in self.tray.hotkeys_registered:
+                self._hk_held_map[action] = False
+                continue
+            parsed = parse_hotkey(self.hotkeys.get(action, ''))
+            if parsed is None:
+                self._hk_held_map[action] = False
+                continue
+            mods, vk, _canon = parsed
+            ok = key_down(vk)
+            if ok and (mods & MOD_CONTROL) and not key_down(VK_CONTROL):
+                ok = False
+            if ok and (mods & MOD_ALT) and not key_down(VK_MENU):
+                ok = False
+            if ok and (mods & MOD_SHIFT) and not key_down(VK_SHIFT):
+                ok = False
+            if ok and (mods & MOD_WIN) and not (key_down(VK_LWIN) or key_down(VK_RWIN)):
+                ok = False
+            if ok and not self._hk_held_map.get(action, False):
+                actions[action]()
+            self._hk_held_map[action] = ok
 
     # ------------------------------------------------------------ 主轮询
     def poll(self):
@@ -508,13 +853,14 @@ class App:
 
     def _poll_once(self):
         self.check_hotkey()
+        self._check_theme_schedule()
 
         # 用户双击快捷方式（第二个实例）请求打开设置窗口
         if self._show_event is not None and \
                 kernel32.WaitForSingleObject(self._show_event, 0) == WAIT_OBJECT_0:
             self._tray_open()
 
-        if self.auto_var.get() and not self._paused and time.monotonic() >= self._grace_until:
+        if (not self.blackout.active) and self.auto_var.get() and not self._paused and time.monotonic() >= self._grace_until:
             x, y = get_cursor()
 
             # 鼠标位置变化 = 用户在活动，刷新最后活动时间
@@ -583,15 +929,157 @@ def _signal_running_instance(mutex, event_names=(EVENT_NAME, LEGACY_EVENT_NAME))
     kernel32.CloseHandle(existing_event)
 
 
-def main():
-    args = {a.lower() for a in sys.argv[1:]}
+CLI_FLAG_TO_CMD = {
+    '--settings': CLI_CMD_SETTINGS,
+    '--toggle-icons': CLI_CMD_TOGGLE_ICONS,
+    '--show-icons': CLI_CMD_SHOW_ICONS,
+    '--hide-icons': CLI_CMD_HIDE_ICONS,
+    '--toggle-theme': CLI_CMD_TOGGLE_THEME,
+    '--screen-off': CLI_CMD_SCREEN_OFF,
+    '--awake-toggle': CLI_CMD_AWAKE_TOGGLE,
+    '--awake-on': CLI_CMD_AWAKE_ON,
+    '--awake-off': CLI_CMD_AWAKE_OFF,
+}
+
+
+def parse_cli_args(argv):
+    """解析命令行参数 -> (mode, payload)，mode 为 help / restore-icons / remote / run。"""
+    args = [str(a).strip().lower() for a in (argv or ())]
+    if '--help' in args or '-h' in args:
+        return 'help', None
     if '--restore-icons' in args:
+        return 'restore-icons', None
+    for arg in args:
+        if arg in CLI_FLAG_TO_CMD:
+            return 'remote', CLI_FLAG_TO_CMD[arg]
+    start_minimized = ('--minimized' in args) or ('-m' in args)
+    return 'run', start_minimized
+
+
+def _send_cli_command(cmd_id):
+    """向已在运行中的 Blanket 主实例发送遥控指令，成功返回 True。"""
+    cli_msg = user32.RegisterWindowMessageW(CLI_MSG_NAME)
+    if not cli_msg:
+        return False
+    delivered = []
+
+    def enum_cb(hwnd, _lparam):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 7:  # len('Blanket')
+            buf = ctypes.create_unicode_buffer(16)
+            user32.GetWindowTextW(hwnd, buf, 16)
+            if buf.value == 'Blanket':
+                res = ctypes.c_size_t()
+                ok = user32.SendMessageTimeoutW(
+                    hwnd, cli_msg, int(cmd_id), None, SMTO_ABORTIFHUNG, 400, ctypes.byref(res),
+                )
+                if ok and res.value == CLI_ACK_MAGIC:
+                    delivered.append(True)
+                    return False
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
+    return bool(delivered)
+
+
+def _run_standalone_blackout(cfg):
+    """主实例未运行时，以独立轻量窗口执行无闪烁纯黑息屏，唤醒后自动还原背光并退出。"""
+    root = tk.Tk()
+    root.withdraw()
+    guard = desktop_recovery.start()
+
+    def sync_guard(val):
+        if guard and guard.stdin:
+            line = b'brightness:clear\n' if val is None else f'brightness:{int(val)}\n'.encode('ascii')
+            try:
+                guard.stdin.write(line)
+                guard.stdin.flush()
+            except OSError:
+                pass
+
+    holder = {}
+
+    def finish():
+        blk = holder.get('blk')
+        if blk is not None:
+            blk.close()
+        if guard and guard.stdin:
+            try:
+                guard.stdin.write(b'restored\n')
+                guard.stdin.close()
+            except OSError:
+                pass
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
+    blk = ScreenBlackout(
+        root,
+        wake_on_move=bool(cfg.get('screen_off_wake_move', False)),
+        on_brightness_guard=sync_guard,
+        on_wake=lambda: root.after(20, finish),
+    )
+    holder['blk'] = blk
+    root.after(80, blk.start)
+    root.mainloop()
+
+
+def _run_stateless_cli(cmd_id):
+    """主实例未运行时，直接执行无需常驻后台的命令行指令。"""
+    if cmd_id == CLI_CMD_TOGGLE_ICONS:
+        vis = icons_visible()
+        return False if vis is None else set_icons_visible(not vis)
+    if cmd_id == CLI_CMD_SHOW_ICONS:
+        return set_icons_visible(True)
+    if cmd_id == CLI_CMD_HIDE_ICONS:
+        return set_icons_visible(False)
+    if cmd_id == CLI_CMD_TOGGLE_THEME:
+        import theme_switch
+        theme_switch.toggle()
+        return True
+    if cmd_id == CLI_CMD_SCREEN_OFF:
+        cfg = load_config()
+        if cfg.get('screen_off_mode') == 'hardware':
+            turn_off_monitors()
+        else:
+            _run_standalone_blackout(cfg)
+        return True
+    return False
+
+
+def main():
+    mode, payload = parse_cli_args(sys.argv[1:])
+    if mode == 'help':
+        print(
+            'Blanket 命令行参数：\n'
+            '  --minimized / -m   静默启动到系统托盘\n'
+            '  --settings         唤起主设置窗口\n'
+            '  --toggle-icons     切换桌面图标显隐\n'
+            '  --show-icons       显示桌面图标\n'
+            '  --hide-icons       隐藏桌面图标\n'
+            '  --toggle-theme     切换 Windows 深浅主题\n'
+            '  --screen-off       一键息屏\n'
+            '  --awake-toggle     切换屏幕常亮（需主程序已运行）\n'
+            '  --awake-on / -off  开启 / 关闭屏幕常亮（需主程序已运行）\n'
+            '  --restore-icons    恢复桌面图标显示'
+        )
+        return
+    if mode == 'restore-icons':
         desktop_recovery.recover_icons()
         return
-    start_minimized = ('--minimized' in args) or ('-m' in args)
+
+    start_minimized = bool(payload) if mode == 'run' else False
+    remote_cmd = payload if mode == 'remote' else None
 
     legacy_mutex = kernel32.CreateMutexW(None, False, LEGACY_MUTEX_NAME)
     if legacy_mutex and ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        if remote_cmd is not None:
+            for _ in range(10):
+                if _send_cli_command(remote_cmd):
+                    kernel32.CloseHandle(legacy_mutex)
+                    return
+                time.sleep(0.1)
         if start_minimized:
             kernel32.CloseHandle(legacy_mutex)
         else:
@@ -604,10 +1092,28 @@ def main():
     if not mutex:
         raise ctypes.WinError(ctypes.get_last_error())
     if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        if remote_cmd is not None:
+            for _ in range(10):
+                if _send_cli_command(remote_cmd):
+                    kernel32.CloseHandle(mutex)
+                    return
+                time.sleep(0.1)
         if start_minimized:
             kernel32.CloseHandle(mutex)
-        else:
+        elif remote_cmd in (None, CLI_CMD_SETTINGS):
             _signal_running_instance(mutex)
+        else:
+            kernel32.CloseHandle(mutex)
+        return
+
+    if remote_cmd is not None and remote_cmd != CLI_CMD_SETTINGS:
+        kernel32.CloseHandle(mutex)
+        try:
+            ok = _run_stateless_cli(remote_cmd)
+            if not ok and remote_cmd in (CLI_CMD_AWAKE_TOGGLE, CLI_CMD_AWAKE_ON, CLI_CMD_AWAKE_OFF):
+                print('Blanket 尚未在后台运行，请先启动 Blanket 后再使用屏幕常亮遥控。')
+        except OSError as err:
+            print(f'执行失败: {err}')
         return
 
     # 主实例：创建自动复位的唤起事件（manualReset=False）

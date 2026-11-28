@@ -184,6 +184,9 @@ DEFAULT_CONFIG = {
 
 def load_config():
     """读取配置，缺失或损坏时返回默认值。"""
+    from hotkeys import sanitize_hotkeys
+    from theme_schedule import sanitize_idle_dim, sanitize_theme_schedule
+
     def read_dict(path):
         try:
             with open(path, encoding='utf-8-sig') as source:
@@ -206,6 +209,13 @@ def load_config():
         merged['zone'] = DEFAULT_CONFIG['zone']
     delay = str(merged['delay'])
     merged['delay'] = delay if delay in ('5', '10', '20') else DEFAULT_CONFIG['delay']
+    merged['theme_schedule'] = sanitize_theme_schedule(merged.get('theme_schedule'))
+    merged['idle_dim'] = sanitize_idle_dim(merged.get('idle_dim'))
+    merged['hotkeys'] = sanitize_hotkeys(merged.get('hotkeys'))
+    if merged.get('screen_off_mode') not in ('blackout', 'hardware'):
+        merged['screen_off_mode'] = 'blackout'
+    if not isinstance(merged.get('screen_off_wake_move'), bool):
+        merged['screen_off_wake_move'] = False
     return merged
 
 

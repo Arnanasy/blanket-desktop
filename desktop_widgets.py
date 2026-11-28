@@ -15,17 +15,18 @@ from clock_extras import (DATE_ADDON_OPTIONS, DATE_FORMAT_PRESETS, DEFAULT_DATE_
                           format_clock_text, format_date_text)
 from clock_face import ClockFace
 from countdown_widget import CountdownWidget
-from desktop_windows import find_desktop_windows
-from display_geometry import bounds
+from desktop_windows import find_desktop_windows, input_idle_seconds
+from display_geometry import bounds, list_monitors
 from launcher_bar import LauncherBar
 from local_weather import refresh as refresh_weather, CACHE_SECONDS
 from media_widget import MediaWidget
 from preferences import save_config
 from sys_monitor import SystemMonitor
 from theme_button import ThemeButton
+from theme_schedule import compute_idle_dim_alpha
 from ui_helpers import attach_hover_preview, usable_fonts
 from wallpaper_clock import sample
-from widget_layout import AnchorRegistry, capture_anchor, resolve_anchor
+from widget_layout import AnchorRegistry, capture_anchor, resolve_anchor, retarget_anchor_to_rect
 from win32 import (user32, dwmapi, RECT, GetWindowLongPtr, class_name, cursor_pos, toplevel_hwnd,
                    add_exstyle, set_click_through, is_own_window, key_down, place_on_desktop,
                    GWL_STYLE, WS_CAPTION, DWMWA_EXTENDED_FRAME_BOUNDS, HWND_BOTTOM,
@@ -111,6 +112,7 @@ class Widgets:
         self.preview = None
         self._preview_overrides = {}
         self._last_alpha = None
+        self._idle_dimmed = False
         self._font_choices = None
 
         # 天气
@@ -325,10 +327,85 @@ class Widgets:
                 max_size = (pw, ph)
         self.face.draw(canvas or self.clock_label, style, self.accent, palette, weather, max_size=max_size)
         if canvas is None:
-            alpha = style['opacity'] / 100
+            alpha = self._effective_clock_alpha()
             if alpha != self._last_alpha:
                 self._last_alpha = alpha
                 self.clock.attributes('-alpha', alpha)
+
+    def _effective_clock_alpha(self):
+        idle_cfg = self.app.cfg.get('idle_dim') if hasattr(self.app, 'cfg') else None
+        if self._idle_dimmed and isinstance(idle_cfg, dict) and idle_cfg.get('enabled'):
+            dim_pct = max(15, min(80, int(idle_cfg.get('opacity', 35))))
+            return min(self.style['opacity'], dim_pct) / 100.0
+        return self.style['opacity'] / 100.0
+
+    def apply_idle_dim(self, idle_cfg, idle_seconds):
+        """根据电脑闲置时间同步压暗或恢复桌面时钟与系统监控的透明度。"""
+        alpha, dimmed = compute_idle_dim_alpha(idle_cfg, idle_seconds, self.style['opacity'])
+        self._idle_dimmed = dimmed
+        if alpha != self._last_alpha:
+            self._last_alpha = alpha
+            try:
+                self.clock.attributes('-alpha', alpha)
+            except tk.TclError:
+                pass
+        if dimmed and isinstance(idle_cfg, dict):
+            mon_alpha = max(1, int(self.monitor.cfg.get('alpha', 100)))
+            dim_pct = max(15, min(80, int(idle_cfg.get('opacity', 35))))
+            self.monitor.set_idle_dim(min(1.0, dim_pct / mon_alpha))
+        else:
+            self.monitor.set_idle_dim(1.0)
+
+    def move_widgets_to_monitor(self, target_rect):
+        """把时钟、音乐胶囊、同步歌词、倒计时与贴边主题按钮一键迁移到指定屏幕工作区。"""
+        l, t, r, b = (int(v) for v in target_rect)
+        # 1. 时钟
+        cw, ch = max(1, self.clock.winfo_reqwidth()), max(1, self.clock.winfo_reqheight())
+        c_pos, c_anchor = retarget_anchor_to_rect(self.cfg.get('anchor'), self._saved_position(), cw, ch, target_rect, margin=0)
+        self.cfg['position'] = c_pos
+        self.cfg['anchor'] = c_anchor
+
+        # 2. 音乐胶囊 & 独立歌词
+        mw, mh = self.media._current_width(), self.media._card_h()
+        self.media.pos, self.media.anchor = retarget_anchor_to_rect(
+            self.media.anchor, self.media.pos, mw, mh, target_rect, margin=8,
+        )
+        lw, lh = self.media.lyrics._last_size
+        self.media.lyrics.pos, self.media.lyrics.anchor = retarget_anchor_to_rect(
+            self.media.lyrics.anchor, self.media.lyrics.pos, max(220, lw), max(40, lh), target_rect, margin=8,
+        )
+
+        # 3. 番茄钟 / 倒计时
+        dw, dh = self.countdown._last_size
+        self.countdown.pos, self.countdown.anchor = retarget_anchor_to_rect(
+            self.countdown.anchor, self.countdown.pos, max(120, dw), max(40, dh), target_rect, margin=8,
+        )
+
+        # 4. 贴边主题按钮（贴在目标屏幕右边缘）
+        tb = self.theme_button
+        btn_y = max(t + 8, min(int(tb.cur_y), b - tb.size - 8))
+        tb.pos = [max(l, r - 6), btn_y]
+        tb.cur_x = float(tb.pos[0])
+        tb.target_x = float(tb.pos[0])
+        tb.cur_y = float(btn_y)
+        if tb.visible():
+            tb.place()
+
+        # 5. 系统监控（按原屏幕纵坐标比例迁移，并贴到目标屏幕左/右边缘）
+        mon = getattr(self, 'monitor', None)
+        if mon is not None:
+            mw, mh = mon._window_size()
+            old_pos = mon.cfg.get('position', [l + 5, t + 20])
+            mapped_pos, _ = retarget_anchor_to_rect(None, old_pos, mw, mh, target_rect, margin=0)
+            edge_x = l + 5 if mon.cfg.get('edge') == '左' else max(l + 5, r - mw - 5)
+            my = max(t, min(int(mapped_pos[1]), max(t, b - mh)))
+            mon._pos = [edge_x, my]
+            mon.cfg['position'] = [edge_x, my]
+            if mon.visible:
+                mon.place(edge_x, my)
+
+        self.anchors.relayout_all()
+        self.save()
 
     # ------------------------------------------------------------ 壁纸取色
     def sample_wallpaper(self):
@@ -544,8 +621,40 @@ class Widgets:
                                    ('启用右侧启动栏', self.bar.enabled, self.save),
                                    ('主题按钮始终置顶', self.theme_button.always, self.save)]:
             ttk.Checkbutton(switches, text=text, variable=var, command=command).pack(side='left')
+
+        mon_state = {'items': list_monitors(work=True)}
+        mon_row = ttk.Frame(pane)
+        mon_row.pack(fill='x', pady=(8, 0))
+        ttk.Label(mon_row, text='多屏归位：').pack(side='left')
+        mon_labels = [m['label'] for m in mon_state['items']]
+        mon_var = tk.StringVar(value=mon_labels[0])
+
+        def refresh_monitor_choices():
+            fresh = list_monitors(work=True)
+            mon_state['items'] = fresh
+            labels = [m['label'] for m in fresh]
+            mon_cb.configure(values=labels)
+            if mon_var.get() not in labels:
+                mon_var.set(labels[0])
+
+        mon_cb = ttk.Combobox(
+            mon_row, textvariable=mon_var, values=mon_labels,
+            state='readonly', width=28, postcommand=refresh_monitor_choices,
+        )
+        mon_cb.pack(side='left', padx=(4, 8))
+
+        def move_to_selected():
+            refresh_monitor_choices()
+            monitors = mon_state['items']
+            idx = mon_cb.current()
+            if idx < 0 or idx >= len(monitors):
+                idx = 0
+            self.move_widgets_to_monitor(monitors[idx]['rect'])
+
+        ttk.Button(mon_row, text='把全部挂件移到此屏', command=move_to_selected).pack(side='left')
+
         ttk.Label(pane, text='图标隐藏时才显示时钟 · 可直接拖动 · 双击时钟或点 ☀/☾ 按钮一键切换深浅主题（右键设置）'
-                  ).pack(anchor='w', pady=(10, 4))
+                  ).pack(anchor='w', pady=(8, 4))
         frame = ttk.Frame(pane)
         frame.pack(fill='both', expand=True)
         viewport = self.preview_viewport = tk.Canvas(frame, bg='#334155', highlightthickness=0, height=round(150 * self.ui_scale))
@@ -589,7 +698,8 @@ class Widgets:
                 y = t
             elif abs(y + height - b) < SNAP:
                 y = max(t, b - height)
-        user32.SetWindowPos(self.clock_hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+        if (x, y) != (self.clock.winfo_x(), self.clock.winfo_y()):
+            user32.SetWindowPos(self.clock_hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
         self.cfg['position'] = [x, y]
 
     def drag_start(self, e):
@@ -692,6 +802,10 @@ class Widgets:
                 self.root.after(TICK_MS, self.tick)
 
     def _tick(self):
+        blackout = getattr(self.app, 'blackout', None)
+        if blackout is not None and blackout.active:
+            blackout.ensure_top()
+            return
         now = time.monotonic()
         p = cursor_pos()
         self.update_weather(now)
@@ -705,6 +819,12 @@ class Widgets:
         if text != self.last_clock:
             self.redraw()
             self.last_clock = text
+
+        idle_cfg = self.app.cfg.get('idle_dim') if hasattr(self.app, 'cfg') else None
+        if isinstance(idle_cfg, dict) and idle_cfg.get('enabled'):
+            self.apply_idle_dim(idle_cfg, input_idle_seconds())
+        elif self._idle_dimmed:
+            self.apply_idle_dim({'enabled': False}, 0.0)
 
         foreground = user32.GetForegroundWindow()
         name = class_name(foreground)

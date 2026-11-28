@@ -13,8 +13,8 @@ from urllib.request import urlopen
 import webbrowser
 import winreg
 
-from win32 import (user32, kernel32, shell32, ole32, HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER,
-                   ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED,
+from win32 import (user32, kernel32, shell32, ole32, WM_SYSCOMMAND, SC_MONITORPOWER,
+                   SMTO_ABORTIFHUNG, ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED,
                    CF_UNICODETEXT, CF_HDROP, DROPEFFECT_COPY, GMEM_MOVEABLE,
                    COINIT_APARTMENTTHREADED, S_OK, S_FALSE, RPC_E_CHANGED_MODE)
 
@@ -319,9 +319,20 @@ class KeepAwake:
             self.active = False
 
 
-def turn_off_monitors():
-    """向系统广播关闭显示器电源消息（动一下鼠标或按键即可唤醒）。"""
-    user32.PostMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
+def turn_off_monitors(owner_hwnd=None):
+    """向单个窗口投递关闭显示器电源消息（严禁用 HWND_BROADCAST，避免多窗口排队重触发导致黑屏回不来或唤醒后持续闪烁）。"""
+    if owner_hwnd and user32.IsWindow(owner_hwnd):
+        return bool(user32.PostMessageW(owner_hwnd, WM_SYSCOMMAND, SC_MONITORPOWER, 2))
+    tmp = user32.CreateWindowExW(0, 'STATIC', None, 0, 0, 0, 0, 0, None, None, None, None)
+    if not tmp:
+        return False
+    try:
+        res = ctypes.c_size_t()
+        return bool(user32.SendMessageTimeoutW(
+            tmp, WM_SYSCOMMAND, SC_MONITORPOWER, 2, SMTO_ABORTIFHUNG, 500, ctypes.byref(res),
+        ))
+    finally:
+        user32.DestroyWindow(tmp)
 
 
 def _running_deskkit_port(start_port=18642, span=20):

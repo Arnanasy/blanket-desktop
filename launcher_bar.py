@@ -120,6 +120,7 @@ class LauncherBar:
         self.scroll_canvas = None
         self.scrollbar = None
         self.body = None
+        self._sleep_timer = None
         self.foot = None
         self._body_win_id = None
         self._scrollable = False
@@ -469,10 +470,18 @@ class LauncherBar:
         ttk.Button(btns, text='完成', command=w.destroy).pack(side='right')
 
     # ------------------------------------------------------------ 快捷开关与倒计时动作
-    def _toggle_awake(self):
-        self.awake.toggle()
+    def set_awake(self, enable=None):
+        """切换或指定屏幕常亮状态，并刷新快捷抽屉按钮显示。"""
+        if enable is None:
+            self.awake.toggle()
+        else:
+            self.awake.set_enabled(bool(enable))
         self.render()
         self._refresh_if_visible()
+        return self.awake.active
+
+    def _toggle_awake(self):
+        self.set_awake(None)
 
     def _is_monitor_pinned(self):
         mon = getattr(self.widgets, 'monitor', None)
@@ -507,8 +516,21 @@ class LauncherBar:
 
     def _sleep_screen(self):
         self.win.withdraw()
-        # 延迟 350ms 再广播息屏，避免鼠标松开时的微小位移立刻又把屏幕唤醒
-        self.widgets.root.after(350, turn_off_monitors)
+        if hasattr(self.app, 'screen_off'):
+            self.app.screen_off(delay_ms=150)
+            return
+        if self._sleep_timer is not None:
+            try:
+                self.widgets.root.after_cancel(self._sleep_timer)
+            except tk.TclError:
+                pass
+            self._sleep_timer = None
+        hwnd = getattr(getattr(self.app, 'tray', None), 'hwnd', None)
+        self._sleep_timer = self.widgets.root.after(350, lambda: self._fire_sleep_screen(hwnd))
+
+    def _fire_sleep_screen(self, hwnd):
+        self._sleep_timer = None
+        turn_off_monitors(hwnd)
 
     def _open_deskkit(self):
         ok, resolved = launch_deskkit(self.deskkit_path, APP_DIR)

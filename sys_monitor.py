@@ -433,6 +433,7 @@ class SystemMonitor:
         self._size = (120, 48)
         self._pos = list(self.cfg.get('position', [0, 0]))
         self._alpha_scale = 1.0
+        self._idle_alpha_scale = 1.0
         self.edge_start = None
         self.edge_y = 0
         self.edge_monitor = None
@@ -457,8 +458,23 @@ class SystemMonitor:
             return False
         w_px, h_px, bgra = self._layered_frame
         if opacity is None:
-            opacity = round(255 * (self.cfg['alpha'] / 100.0) * self._alpha_scale)
+            opacity = round(255 * (self.cfg['alpha'] / 100.0) * self._alpha_scale * self._idle_alpha_scale)
         return update_layered_rgba(self.hwnd, w_px, h_px, bgra, x=x, y=y, opacity=opacity)
+
+    def set_idle_dim(self, scale):
+        """在电脑闲置时按比例压暗监控挂件透明度（仅变化时刷新窗口）。"""
+        target = max(0.15, min(1.0, float(scale)))
+        if abs(target - self._idle_alpha_scale) < 0.005:
+            return
+        self._idle_alpha_scale = target
+        if self.visible and self.fade is None:
+            try:
+                if self._layered:
+                    self._commit_layered(x=self._pos[0], y=self._pos[1])
+                else:
+                    self.win.attributes('-alpha', (self.cfg['alpha'] / 100.0) * self._idle_alpha_scale)
+            except tk.TclError:
+                pass
 
     def _notify_pin_ui(self):
         bar = getattr(self.widgets, 'bar', None)
@@ -642,7 +658,7 @@ class SystemMonitor:
 
     def apply(self):
         if not self._layered:
-            self.win.attributes('-alpha', self.cfg['alpha'] / 100)
+            self.win.attributes('-alpha', (self.cfg['alpha'] / 100.0) * self._idle_alpha_scale)
         self.render()
 
     def queue_save(self):
@@ -824,7 +840,7 @@ class SystemMonitor:
                 if self._layered:
                     self._commit_layered(x=self._pos[0], y=self._pos[1])
                 else:
-                    self.win.attributes('-alpha', self.cfg['alpha'] / 100 * self._alpha_scale)
+                    self.win.attributes('-alpha', self.cfg['alpha'] / 100 * self._alpha_scale * self._idle_alpha_scale)
             except tk.TclError:
                 self.fade = None
                 return

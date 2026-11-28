@@ -67,13 +67,22 @@ GA_ROOT = 2
 VK_LBUTTON = 0x01
 VK_RBUTTON = 0x02
 VK_MBUTTON = 0x04
+VK_TAB = 0x09
+VK_RETURN = 0x0D
+VK_SHIFT = 0x10
 VK_CONTROL = 0x11
 VK_MENU = 0x12                       # Alt
+VK_ESCAPE = 0x1B
+VK_SPACE = 0x20
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
 VK_H = 0x48
 VK_T = 0x54
 KEY_DOWN = 0x8000
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
 
 # 消息
@@ -91,8 +100,10 @@ WM_WTSSESSION_CHANGE = 0x02B1
 WM_HOTKEY = 0x0312
 WM_APP = 0x8000
 SC_MONITORPOWER = 0xF170
+PBT_APMSUSPEND = 4
 PBT_APMRESUMESUSPEND = 7
 PBT_APMRESUMEAUTOMATIC = 18
+WTS_SESSION_LOCK = 7
 WTS_SESSION_UNLOCK = 8
 NOTIFY_FOR_THIS_SESSION = 0
 HWND_BROADCAST = 0xFFFF
@@ -115,6 +126,7 @@ SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
 MONITOR_DEFAULTTONEAREST = 2
+MONITORINFOF_PRIMARY = 1
 
 # 托盘 / 菜单 / 图标
 NIM_ADD = 0
@@ -254,6 +266,8 @@ class InterfaceTable(ctypes.Structure):
 
 # ---------------------------------------------------------------- 回调类型
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+MONITORENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE, wintypes.HDC,
+                                     ctypes.POINTER(RECT), wintypes.LPARAM)
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
 
@@ -273,6 +287,9 @@ INT = ctypes.c_int
 # ---------------------------------------------------------------- user32
 _sig(user32.FindWindowW, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
 _sig(user32.FindWindowExW, HWND, HWND, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
+_sig(user32.CreateWindowExW, HWND, DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, DWORD,
+     INT, INT, INT, INT, HWND, H, H, wintypes.LPVOID)
+_sig(user32.DestroyWindow, BOOL, HWND)
 _sig(user32.EnumWindows, BOOL, WNDENUMPROC, wintypes.LPARAM)
 _sig(user32.ShowWindow, BOOL, HWND, INT)
 _sig(user32.ShowWindowAsync, BOOL, HWND, INT)
@@ -289,6 +306,7 @@ _sig(user32.GetAncestor, HWND, HWND, UINT)
 _sig(user32.GetWindow, HWND, HWND, UINT)
 _sig(user32.GetForegroundWindow, HWND)
 _sig(user32.GetWindowThreadProcessId, DWORD, HWND, ctypes.POINTER(DWORD))
+_sig(user32.AttachThreadInput, BOOL, DWORD, DWORD, BOOL)
 _sig(user32.SetForegroundWindow, BOOL, HWND)
 _sig(user32.SetWindowPos, BOOL, HWND, HWND, INT, INT, INT, INT, UINT)
 _sig(user32.GetWindowRect, BOOL, HWND, ctypes.POINTER(RECT))
@@ -305,6 +323,9 @@ _sig(user32.ReleaseDC, INT, HWND, wintypes.HDC)
 _sig(user32.RegisterWindowMessageW, UINT, wintypes.LPCWSTR)
 _sig(user32.MonitorFromPoint, H, POINT, DWORD)
 _sig(user32.GetMonitorInfoW, BOOL, H, ctypes.POINTER(MONITORINFO))
+_sig(user32.EnumDisplayMonitors, BOOL, wintypes.HDC, ctypes.POINTER(RECT), MONITORENUMPROC, wintypes.LPARAM)
+_sig(user32.GetWindowTextLengthW, INT, HWND)
+_sig(user32.GetWindowTextW, INT, HWND, wintypes.LPWSTR, INT)
 _sig(user32.SendMessageTimeoutW, LRESULT, HWND, UINT, wintypes.WPARAM, wintypes.LPCWSTR,
      UINT, UINT, ctypes.POINTER(ctypes.c_size_t))
 _sig(user32.MessageBoxW, INT, HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, UINT)
@@ -336,6 +357,7 @@ _sig(kernel32.SetEvent, BOOL, H)
 _sig(kernel32.CloseHandle, BOOL, H)
 _sig(kernel32.WaitForSingleObject, DWORD, H, DWORD)
 _sig(kernel32.GetTickCount, DWORD)
+_sig(kernel32.GetCurrentThreadId, DWORD)
 _sig(kernel32.SetThreadExecutionState, DWORD, DWORD)
 _sig(kernel32.GlobalAlloc, H, UINT, ctypes.c_size_t)
 _sig(kernel32.GlobalLock, wintypes.LPVOID, H)
